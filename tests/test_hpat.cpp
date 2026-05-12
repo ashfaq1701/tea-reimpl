@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "tea/bias.hpp"
+#include "tea/config.hpp"
 #include "tea/graph.hpp"
 #include "tea/hpat.hpp"
 #include "tea/pat.hpp"
@@ -31,13 +32,15 @@
 namespace {
 
 tea::TemporalGraph build_star(int K, int64_t ts_step = 100) {
+    // Inbound fan-in: K edges target vertex 0 from sources 100..99+K.
+    // After ASC sort of v=0's inbound, position p has source 99+K-p
+    // and ts (p+1)*ts_step.
     std::vector<tea::Edge> edges;
     edges.reserve(K);
     for (int i = 0; i < K; ++i) {
-        edges.push_back({0, 100 + i, static_cast<int64_t>((K - i) * ts_step)});
+        edges.push_back({100 + i, 0, static_cast<int64_t>((K - i) * ts_step)});
     }
     tea::TemporalGraph g;
-    // num_vertices must cover max(u, v)+1 = max(0, 100+K-1)+1.
     g.build(std::move(edges), /*num_vertices=*/100 + K + 1, /*is_directed=*/true);
     return g;
 }
@@ -198,13 +201,13 @@ TEST(HpatBuild, EmptyGraphIsHarmless) {
 }
 
 TEST(HpatBuild, MultiVertexCoexistence) {
-    // Two hierarchical-path vertices with different degrees — both must have
-    // correct K, sizes, and trunks; their slices must not bleed into each
-    // other.  Degrees chosen above kHpatDegreeThreshold to keep both on the
-    // hierarchical (non-solo) path.
+    // Two hierarchical-path vertices with different inbound degrees — both
+    // must have correct K, sizes, and trunks; their slices must not bleed
+    // into each other.  Degrees chosen above kHpatDegreeThreshold to keep
+    // both on the hierarchical (non-solo) path.
     std::vector<tea::Edge> edges;
-    for (int i = 0; i < 80;  ++i) edges.push_back({0, 100 + i, 1000 + i});
-    for (int i = 0; i < 200; ++i) edges.push_back({1, 1000 + i, 2000 + i});
+    for (int i = 0; i < 80;  ++i) edges.push_back({100 + i, 0, 1000 + i});
+    for (int i = 0; i < 200; ++i) edges.push_back({1000 + i, 1, 2000 + i});
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/3000, /*is_directed=*/true);
 
@@ -222,10 +225,11 @@ TEST(HpatBuild, MultiVertexCoexistence) {
 }
 
 TEST(HpatBuild, SoloAndHierCoexist) {
-    // One solo (D=10) + one hierarchical (D=200): no cross-bleed.
+    // One solo (inbound D=10) + one hierarchical (inbound D=200): no
+    // cross-bleed.
     std::vector<tea::Edge> edges;
-    for (int i = 0; i < 10;  ++i) edges.push_back({0, 100 + i, 1000 + i});
-    for (int i = 0; i < 200; ++i) edges.push_back({1, 1000 + i, 2000 + i});
+    for (int i = 0; i < 10;  ++i) edges.push_back({100 + i, 0, 1000 + i});
+    for (int i = 0; i < 200; ++i) edges.push_back({1000 + i, 1, 2000 + i});
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/3000, /*is_directed=*/true);
 
@@ -335,7 +339,8 @@ TEST(SamplerHpat, UniformDistribution_FullVertex) {
     tea::UniformBias bias;
     hpat.build(g, bias);
     auto p = analytic_probs(g, bias, 0);
-    distribution_check_hpat(g, hpat, bias, 0, -1, 200000, 0x1111, p, 0);
+    distribution_check_hpat(g, hpat, bias, 0, tea::kSentinelStartTimestamp,
+                            200000, 0x1111, p, 0);
 }
 
 TEST(SamplerHpat, UniformDistribution_PrefixOfNonPowerLen) {
@@ -344,9 +349,11 @@ TEST(SamplerHpat, UniformDistribution_PrefixOfNonPowerLen) {
     tea::Hpat<tea::UniformBias> hpat;
     tea::UniformBias bias;
     hpat.build(g, bias);
-    // ts_desc = [1600..100]. Γ_len=13 → t_prev < ts[12] = 400 and ≥ ts[13] = 300
+    // ts_asc = [100, 200, ..., 1600]. Backward Γ_len=13 → t_prev > ts[12]=1300
+    // and ≤ ts[13]=1400.  Pick t_prev=1350.
+    ASSERT_EQ(g.candidate_set_len(0, 1350), 13);
     auto p = analytic_probs(g, bias, 0, 0, 13);
-    distribution_check_hpat(g, hpat, bias, 0, /*t_prev=*/350, 300000, 0x2222, p, 0);
+    distribution_check_hpat(g, hpat, bias, 0, /*t_prev=*/1350, 300000, 0x2222, p, 0);
 }
 
 TEST(SamplerHpat, LinearDistribution_NonPowerLen) {
@@ -354,8 +361,10 @@ TEST(SamplerHpat, LinearDistribution_NonPowerLen) {
     tea::Hpat<tea::LinearBias> hpat;
     tea::LinearBias bias;
     hpat.build(g, bias);
+    // ts_asc = [100, 200, ..., 1600]. Γ_len=11 → t_prev in (1100, 1200].
+    ASSERT_EQ(g.candidate_set_len(0, 1150), 11);
     auto p = analytic_probs(g, bias, 0, 0, 11);
-    distribution_check_hpat(g, hpat, bias, 0, 550, 300000, 0x3333, p, 0);
+    distribution_check_hpat(g, hpat, bias, 0, /*t_prev=*/1150, 300000, 0x3333, p, 0);
 }
 
 TEST(SamplerHpat, ExponentialDistribution) {
@@ -364,8 +373,10 @@ TEST(SamplerHpat, ExponentialDistribution) {
     tea::ExponentialBias bias;
     hpat.build(g, bias);
     auto p = analytic_probs(g, bias, 0);
-    EXPECT_GT(p[0], p[1]);
-    distribution_check_hpat(g, hpat, bias, 0, -1, 300000, 0x4444, p, 0);
+    // ASC: newest (largest t) at last position → largest weight.
+    EXPECT_GT(p.back(), p[p.size() - 2]);
+    distribution_check_hpat(g, hpat, bias, 0, tea::kSentinelStartTimestamp,
+                            300000, 0x4444, p, 0);
 }
 
 // ============================================================================
@@ -395,10 +406,10 @@ TEST(HpatVsPat, EmpiricalDistributionsAgree) {
     };
 
     auto pat_counts  = run([&](tea::Pcg64& rng, tea::SamplerScratch& s) {
-        return tea::sample_pat(g, pat, bias, 0, -1, rng, s);
+        return tea::sample_pat(g, pat, bias, 0, tea::kSentinelStartTimestamp, rng, s);
     });
     auto hpat_counts = run([&](tea::Pcg64& rng, tea::SamplerScratch& s) {
-        return tea::sample_hpat(g, hpat, bias, 0, -1, rng, s);
+        return tea::sample_hpat(g, hpat, bias, 0, tea::kSentinelStartTimestamp, rng, s);
     });
 
     // Proper two-sample chi-square test of distribution equality.
@@ -427,9 +438,10 @@ TEST(HpatVsPat, BothAgreeOnPartialPrefix) {
     tea::Hpat<tea::LinearBias> hpat;  hpat.build(g, bias);
 
     // Γ_len = 13 by choosing t_prev between ts[12] and ts[13].
-    // ts_step=100, ts_desc = [2000, 1900, ..., 100]. ts[12]=800, ts[13]=700.
+    // ts_step=100, ts_asc = [100, 200, ..., 2000].  Γ_len=13 → t_prev in
+    // (ts[12]=1300, ts[13]=1400]. Pick T_PREV=1350.
     constexpr int N = 200000;
-    constexpr int64_t T_PREV = 750;
+    constexpr int64_t T_PREV = 1350;
 
     auto run = [&](auto sample_fn) -> std::vector<int64_t> {
         tea::Pcg64 rng(0xbabe, 0);

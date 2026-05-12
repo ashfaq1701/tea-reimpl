@@ -39,11 +39,6 @@ void run_non_node2vec(const tea::TemporalGraph& g,
     const char* disable_aux_env = std::getenv("TEA_DISABLE_AUX");
     const bool  disable_aux     = disable_aux_env && disable_aux_env[0] == '1';
     const std::size_t aux_budget = disable_aux ? 0 : kAuxIndexMaxBytes;
-    // TEA paper §3.3 first ad-hoc optimization: start the walk with
-    // t_prev = min_incoming_time(u) instead of the sentinel.
-    const char* temporal_start_env = std::getenv("TEA_TEMPORAL_START");
-    const bool  use_temporal_start =
-        temporal_start_env && temporal_start_env[0] == '1';
 
     auto t0 = std::chrono::steady_clock::now();
     Pat<BiasT>  pat;
@@ -86,15 +81,13 @@ void run_non_node2vec(const tea::TemporalGraph& g,
                                 static_cast<int32_t>(num_walks),
                                 args.max_walk_len,
                                 /*global_seed=*/0xc0ffee'd00d'd00dULL,
-                                walks_out.data(), walk_lens_out.data(),
-                                use_temporal_start);
+                                walks_out.data(), walk_lens_out.data());
     } else {
         stats = run_walks_pat(g, pat, bias, starts.data(),
                                static_cast<int32_t>(num_walks),
                                args.max_walk_len,
                                /*global_seed=*/0xc0ffee'd00d'd00dULL,
-                               walks_out.data(), walk_lens_out.data(),
-                               use_temporal_start);
+                               walks_out.data(), walk_lens_out.data());
     }
 
     // --- Report — these lines mirror tempest's regex format so
@@ -131,9 +124,6 @@ void run_node2vec(const tea::TemporalGraph& g,
     const char* disable_aux_env = std::getenv("TEA_DISABLE_AUX");
     const bool  disable_aux     = disable_aux_env && disable_aux_env[0] == '1';
     const std::size_t aux_budget = disable_aux ? 0 : kAuxIndexMaxBytes;
-    const char* temporal_start_env = std::getenv("TEA_TEMPORAL_START");
-    const bool  use_temporal_start =
-        temporal_start_env && temporal_start_env[0] == '1';
 
     t0 = std::chrono::steady_clock::now();
     Pat<Node2VecBias>  pat;
@@ -169,8 +159,7 @@ void run_node2vec(const tea::TemporalGraph& g,
                                          args.max_walk_len,
                                          0xc0ffee'd00d'd00dULL,
                                          walks_out.data(),
-                                         walk_lens_out.data(),
-                                         use_temporal_start);
+                                         walk_lens_out.data());
     } else {
         stats = run_walks_pat_node2vec(g, pat, bias, neighbors,
                                         starts.data(),
@@ -178,8 +167,7 @@ void run_node2vec(const tea::TemporalGraph& g,
                                         args.max_walk_len,
                                         0xc0ffee'd00d'd00dULL,
                                         walks_out.data(),
-                                        walk_lens_out.data(),
-                                        use_temporal_start);
+                                        walk_lens_out.data());
     }
 
     std::printf("Walks done:         %ld  (%.2f s)\n",

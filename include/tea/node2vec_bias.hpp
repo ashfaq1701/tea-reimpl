@@ -52,10 +52,10 @@ struct Node2VecBias {
     }
 
     // Forward static-weight computation to ExponentialBias.
-    PerVertexParams compute_per_vertex_params(span<const int64_t> ts_desc) const noexcept {
+    PerVertexParams compute_per_vertex_params(span<const int64_t> ts_asc) const noexcept {
         ExponentialBias e;
         e.timescale_bound = timescale_bound;
-        return e.compute_per_vertex_params(ts_desc);
+        return e.compute_per_vertex_params(ts_asc);
     }
 
     inline void compute_weights(span<const int64_t>     ts_slice,
@@ -67,11 +67,11 @@ struct Node2VecBias {
         e.compute_weights(ts_slice, params, slice_start_pos, out);
     }
 
-    inline void compute_weights_full(span<const int64_t> ts_desc,
+    inline void compute_weights_full(span<const int64_t> ts_asc,
                                      double*             out) const noexcept {
         ExponentialBias e;
         e.timescale_bound = timescale_bound;
-        e.compute_weights_full(ts_desc, out);
+        e.compute_weights_full(ts_asc, out);
     }
 
     // β(w, v) / β_max — the rejection test's acceptance probability for a

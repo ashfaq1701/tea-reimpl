@@ -29,9 +29,10 @@ constexpr int kPatTrunkSizeMin = 8;
 constexpr int32_t kWalkDeadSentinel = -1;
 
 // First-step "previous timestamp" sentinel — every edge of the start vertex
-// is a candidate (Γ_t(u) = all of u's edges). INT64_MIN is the natural choice
-// since real timestamps are strictly greater.
-constexpr int64_t kSentinelStartTimestamp = INT64_MIN;
+// is a candidate (Γ_t(u) = all of u's edges).  We do BACKWARD walks: the
+// candidate set is {e : t < t_prev}, so the sentinel must be greater than
+// every real timestamp.  INT64_MAX makes "t < sentinel" admit every edge.
+constexpr int64_t kSentinelStartTimestamp = INT64_MAX;
 
 // --- Low-degree HPAT threshold (paper §3.3 second ad-hoc optimization) ------
 // "If the out-degree of a vertex is relatively low, we can simply build

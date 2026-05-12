@@ -137,6 +137,7 @@ inline CliArgs parse_cli_args(int argc, char** argv) {
 inline void print_config_banner(const CliArgs& a) {
     std::printf(
         "=== tea_walk — TEA reimplementation (CPU) ===\n"
+        "Walk direction:     backward-in-time\n"
         "File:               %s\n"
         "Hop picker:         %s\n"
         "Sampler variant:    %s\n"

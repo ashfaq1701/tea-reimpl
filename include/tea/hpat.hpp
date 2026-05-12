@@ -5,7 +5,7 @@
 //   • At each level k ∈ [0, K_u]:
 //       – trunks at this level have size 2^k
 //       – number of trunks at level k = ⌊D_u / 2^k⌋
-//       – trunk (k, i) covers edges [i·2^k, (i+1)·2^k) of u's time-desc list
+//       – trunk (k, i) covers edges [i·2^k, (i+1)·2^k) of u's time-asc list
 //   • For each trunk, store a Vose alias table + the trunk's total weight.
 //
 // At sample time (Phase 4.3, sample_hpat in sampler.hpp):

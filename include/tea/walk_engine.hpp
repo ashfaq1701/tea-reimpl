@@ -70,12 +70,10 @@ namespace detail {
 //   SampledStep sample(int32_t u, int64_t t_prev, int32_t prev_u,
 //                      Pcg64& rng, SamplerScratch& scratch);
 //
-// `start_t_prev_fn(u_start) → int64_t` returns the t_prev to seed the walk
-// with.  Pass a stateless lambda returning kSentinelStartTimestamp for the
-// default model; pass `graph.min_incoming_time_of` (paper §3.3 opt #1) to
-// avoid traversing edges whose timestamp is earlier than any incoming edge
-// to u_start.
-template <typename SampleFn, typename StartTPrevFn>
+// Backward walks always seed t_prev with kSentinelStartTimestamp
+// (INT64_MAX) so every inbound edge of the start vertex is a first-hop
+// candidate (t < INT64_MAX is trivially true for every real timestamp).
+template <typename SampleFn>
 inline WalkRunStats run_walks_impl(
         const int32_t*  start_vertices,
         int32_t         num_walks,
@@ -83,8 +81,7 @@ inline WalkRunStats run_walks_impl(
         uint64_t        global_seed,
         NodeStep*       walks_out,
         int32_t*        walk_lens_out,
-        SampleFn&&      sample,
-        StartTPrevFn&&  start_t_prev_fn) {
+        SampleFn&&      sample) {
     const auto t_start = std::chrono::steady_clock::now();
 
     int64_t total_steps_local = 0;
@@ -106,7 +103,7 @@ inline WalkRunStats run_walks_impl(
             Pcg64 rng(global_seed, static_cast<uint64_t>(i));
 
             int32_t u       = u_start;
-            int64_t t_prev  = start_t_prev_fn(u_start);
+            int64_t t_prev  = kSentinelStartTimestamp;
             int32_t prev_u  = -1;
             int32_t walk_len = 1;
 
@@ -148,23 +145,6 @@ inline WalkRunStats run_walks_impl(
 // Non-Node2Vec variants (UniformBias, LinearBias, ExponentialBias)
 // ----------------------------------------------------------------------------
 
-// `use_temporal_start = false` (default): each walk starts with
-// t_prev = kSentinelStartTimestamp — every outgoing edge of the start vertex
-// is a first-hop candidate.
-// `use_temporal_start = true` (paper §3.3 ad-hoc opt #1): each walk starts
-// with t_prev = graph.min_incoming_time_of(u_start), so the first hop's
-// candidate set excludes outgoing edges whose t ≤ that value (those are
-// unreachable from any incoming arrival anyway).
-namespace detail {
-template <typename Graph>
-inline auto make_start_t_prev_fn(const Graph& graph, bool use_temporal_start) {
-    return [&graph, use_temporal_start](int32_t u_start) -> int64_t {
-        return use_temporal_start ? graph.min_incoming_time_of(u_start)
-                                  : kSentinelStartTimestamp;
-    };
-}
-}  // namespace detail
-
 template <typename BiasT>
 WalkRunStats run_walks_pat(
         const TemporalGraph& graph,
@@ -175,16 +155,14 @@ WalkRunStats run_walks_pat(
         int32_t              max_walk_len,
         uint64_t             global_seed,
         NodeStep*            walks_out,
-        int32_t*             walk_lens_out,
-        bool                 use_temporal_start = false) {
+        int32_t*             walk_lens_out) {
     return detail::run_walks_impl(
         start_vertices, num_walks, max_walk_len, global_seed,
         walks_out, walk_lens_out,
         [&](int32_t u, int64_t t_prev, int32_t /*prev_u*/,
             Pcg64& rng, SamplerScratch& scratch) {
             return sample_pat(graph, pat, bias, u, t_prev, rng, scratch);
-        },
-        detail::make_start_t_prev_fn(graph, use_temporal_start));
+        });
 }
 
 template <typename BiasT>
@@ -197,16 +175,14 @@ WalkRunStats run_walks_hpat(
         int32_t              max_walk_len,
         uint64_t             global_seed,
         NodeStep*            walks_out,
-        int32_t*             walk_lens_out,
-        bool                 use_temporal_start = false) {
+        int32_t*             walk_lens_out) {
     return detail::run_walks_impl(
         start_vertices, num_walks, max_walk_len, global_seed,
         walks_out, walk_lens_out,
         [&](int32_t u, int64_t t_prev, int32_t /*prev_u*/,
             Pcg64& rng, SamplerScratch& scratch) {
             return sample_hpat(graph, hpat, bias, u, t_prev, rng, scratch);
-        },
-        detail::make_start_t_prev_fn(graph, use_temporal_start));
+        });
 }
 
 // ----------------------------------------------------------------------------
@@ -223,8 +199,7 @@ inline WalkRunStats run_walks_pat_node2vec(
         int32_t                    max_walk_len,
         uint64_t                   global_seed,
         NodeStep*                  walks_out,
-        int32_t*                   walk_lens_out,
-        bool                       use_temporal_start = false) {
+        int32_t*                   walk_lens_out) {
     return detail::run_walks_impl(
         start_vertices, num_walks, max_walk_len, global_seed,
         walks_out, walk_lens_out,
@@ -232,8 +207,7 @@ inline WalkRunStats run_walks_pat_node2vec(
             Pcg64& rng, SamplerScratch& scratch) {
             return sample_pat_node2vec(graph, pat, bias, neighbors,
                                         u, t_prev, prev_u, rng, scratch);
-        },
-        detail::make_start_t_prev_fn(graph, use_temporal_start));
+        });
 }
 
 inline WalkRunStats run_walks_hpat_node2vec(
@@ -246,8 +220,7 @@ inline WalkRunStats run_walks_hpat_node2vec(
         int32_t                    max_walk_len,
         uint64_t                   global_seed,
         NodeStep*                  walks_out,
-        int32_t*                   walk_lens_out,
-        bool                       use_temporal_start = false) {
+        int32_t*                   walk_lens_out) {
     return detail::run_walks_impl(
         start_vertices, num_walks, max_walk_len, global_seed,
         walks_out, walk_lens_out,
@@ -255,8 +228,7 @@ inline WalkRunStats run_walks_hpat_node2vec(
             Pcg64& rng, SamplerScratch& scratch) {
             return sample_hpat_node2vec(graph, hpat, bias, neighbors,
                                          u, t_prev, prev_u, rng, scratch);
-        },
-        detail::make_start_t_prev_fn(graph, use_temporal_start));
+        });
 }
 
 // ----------------------------------------------------------------------------
@@ -268,8 +240,8 @@ inline std::vector<int32_t> make_all_nodes_starts(
         const TemporalGraph& graph,
         int32_t              walks_per_node) {
     const int32_t N = graph.num_vertices();
-    // Only include vertices that have outgoing edges (otherwise the walk dies
-    // immediately and the slot is wasted).
+    // Only include vertices that have a non-empty inbound adjacency
+    // (otherwise the backward walk dies immediately and the slot is wasted).
     std::vector<int32_t> starts;
     starts.reserve(static_cast<std::size_t>(N) * walks_per_node);
     for (int32_t u = 0; u < N; ++u) {

@@ -45,7 +45,3 @@ add_test(NAME test_aux_index COMMAND test_aux_index)
 add_executable(test_solo test_solo.cpp)
 target_link_libraries(test_solo PRIVATE tea tea_compile_flags GTest::gtest_main)
 add_test(NAME test_solo COMMAND test_solo)
-
-add_executable(test_temporal_start test_temporal_start.cpp)
-target_link_libraries(test_temporal_start PRIVATE tea tea_compile_flags GTest::gtest_main)
-add_test(NAME test_temporal_start COMMAND test_temporal_start)
