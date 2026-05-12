@@ -1,0 +1,24 @@
+# build artifacts
+build/
+build-*/
+cmake-build-*/
+
+# editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.cache/
+.clangd/
+compile_commands.json
+
+# CTest
+Testing/
+CTestTestfile.cmake
+
+# OS
+.DS_Store
+Thumbs.db
+
+*.pdf
