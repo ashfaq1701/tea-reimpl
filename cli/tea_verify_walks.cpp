@@ -189,9 +189,12 @@ int run_non_node2vec(const tea::TemporalGraph& g,
                                   walks_out.data(), walk_lens_out.data());
     }
 
+    const double avg_len = (run_stats.num_walks > 0)
+        ? static_cast<double>(run_stats.total_steps) /
+              static_cast<double>(run_stats.num_walks)
+        : 0.0;
     std::printf("Walks generated:    %ld  (avg_len=%.2f)\n",
-                static_cast<long>(run_stats.num_walks),
-                run_stats.avg_walk_len());
+                static_cast<long>(run_stats.num_walks), avg_len);
 
     // Verify every walk.
     VerifyStats stats;
@@ -280,9 +283,12 @@ int run_node2vec(const tea::TemporalGraph& g,
                                            walk_lens_out.data());
     }
 
+    const double avg_len = (run_stats.num_walks > 0)
+        ? static_cast<double>(run_stats.total_steps) /
+              static_cast<double>(run_stats.num_walks)
+        : 0.0;
     std::printf("Walks generated:    %ld  (avg_len=%.2f)\n",
-                static_cast<long>(run_stats.num_walks),
-                run_stats.avg_walk_len());
+                static_cast<long>(run_stats.num_walks), avg_len);
 
     VerifyStats stats;
     auto t0 = std::chrono::steady_clock::now();

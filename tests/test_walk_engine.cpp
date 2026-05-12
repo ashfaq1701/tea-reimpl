@@ -131,7 +131,6 @@ void assert_stats_consistent(const tea::WalkRunStats& stats,
     }
     EXPECT_EQ(stats.total_steps,   expected_steps);
     EXPECT_EQ(stats.dead_at_start, expected_dead);
-    EXPECT_GE(stats.elapsed_sec, 0.0);
 }
 
 }  // namespace
@@ -461,7 +460,4 @@ TEST(WalkEngine, EmptyStartsZeroStats) {
     EXPECT_EQ(stats.num_walks,     0);
     EXPECT_EQ(stats.total_steps,   0);
     EXPECT_EQ(stats.dead_at_start, 0);
-    EXPECT_EQ(stats.walks_per_sec(), 0.0);
-    EXPECT_EQ(stats.steps_per_sec(), 0.0);
-    EXPECT_EQ(stats.avg_walk_len(),  0.0);
 }

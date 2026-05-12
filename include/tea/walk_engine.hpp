@@ -18,11 +18,15 @@
 //     regardless of OMP thread distribution. Negligible re-init cost.
 //   • Per-thread SamplerScratch reused across walks → no per-walk alloc.
 //
-// Returns WalkRunStats with timing + step counts for the run banner.
+// Returns WalkRunStats with pure step counts.  Timing is NOT measured
+// inside the library — callers (the tea_walk CLI binary, the verifier,
+// downstream harnesses) wrap the walker call in their own wall-time
+// bracket to match Tempest's measurement semantic (which times the
+// whole get_random_walks_and_times_* API call, including output buffer
+// allocation and start-list build).
 
 #pragma once
 
-#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -46,22 +50,9 @@
 namespace tea {
 
 struct WalkRunStats {
-    double  elapsed_sec   = 0.0;
     int64_t num_walks     = 0;
     int64_t total_steps   = 0;  // Σ walk_lens (includes slot 0 = start vertex)
     int64_t dead_at_start = 0;  // walks with len == 1 (no successful hop)
-
-    double walks_per_sec() const noexcept {
-        return elapsed_sec > 0 ? static_cast<double>(num_walks) / elapsed_sec : 0.0;
-    }
-    double steps_per_sec() const noexcept {
-        return elapsed_sec > 0 ? static_cast<double>(total_steps) / elapsed_sec : 0.0;
-    }
-    double avg_walk_len() const noexcept {
-        return num_walks > 0
-            ? static_cast<double>(total_steps) / static_cast<double>(num_walks)
-            : 0.0;
-    }
 };
 
 namespace detail {
@@ -82,8 +73,6 @@ inline WalkRunStats run_walks_impl(
         NodeStep*       walks_out,
         int32_t*        walk_lens_out,
         SampleFn&&      sample) {
-    const auto t_start = std::chrono::steady_clock::now();
-
     int64_t total_steps_local = 0;
 
     #pragma omp parallel reduction(+:total_steps_local)
@@ -127,10 +116,7 @@ inline WalkRunStats run_walks_impl(
         }
     }
 
-    const auto t_end = std::chrono::steady_clock::now();
-
     WalkRunStats stats;
-    stats.elapsed_sec = std::chrono::duration<double>(t_end - t_start).count();
     stats.num_walks   = num_walks;
     stats.total_steps = total_steps_local;
     for (int32_t i = 0; i < num_walks; ++i) {

@@ -59,18 +59,26 @@ void run_non_node2vec(const tea::TemporalGraph& g,
                 static_cast<double>(struct_mem) / 1e6, struct_secs,
                 aux_active ? "on" : "off");
 
+    // --- Wall-time bracket (matches Tempest's wall-time semantic).
+    //     Tempest brackets EVERYTHING inside get_random_walks_and_times_*:
+    //     start-vertex list construction (repeated_node_ids), output
+    //     buffer cudaMalloc, walk kernels + sync, D2H copy.  TEA's
+    //     analog includes the same kinds of work it has to do:
+    //     make_all_nodes_starts, output vector<> allocation, the
+    //     OpenMP walk loop.  TEA writes to host memory directly, so
+    //     it has no D2H copy to include.
+    const auto wall_t0 = std::chrono::steady_clock::now();
+
     // --- Build start-vertex list
     const auto starts = make_all_nodes_starts(g, args.num_walks_per_node);
-    if (starts.empty()) {
+    const int64_t num_walks = static_cast<int64_t>(starts.size());
+    if (num_walks == 0) {
         std::printf("No starting vertices (all vertices have degree 0).\n");
         return;
     }
-    std::printf("Walks scheduled:    %zu  (wpn=%d × active vertices)\n",
-                starts.size(), args.num_walks_per_node);
+    const int64_t output_slots = num_walks * args.max_walk_len;
 
     // --- Allocate output buffers
-    const int64_t num_walks    = static_cast<int64_t>(starts.size());
-    const int64_t output_slots = num_walks * args.max_walk_len;
     std::vector<NodeStep> walks_out(static_cast<std::size_t>(output_slots));
     std::vector<int32_t>  walk_lens_out(static_cast<std::size_t>(num_walks));
 
@@ -90,13 +98,29 @@ void run_non_node2vec(const tea::TemporalGraph& g,
                                walks_out.data(), walk_lens_out.data());
     }
 
-    // --- Report — these lines mirror tempest's regex format so
-    //     tempest-benchmarks/ablation_runner/common.py parses unchanged.
+    const auto wall_t1 = std::chrono::steady_clock::now();
+    const double wall_sec =
+        std::chrono::duration<double>(wall_t1 - wall_t0).count();
+
+    const double walks_per_sec = (wall_sec > 0.0)
+        ? static_cast<double>(stats.num_walks) / wall_sec : 0.0;
+    const double steps_per_sec = (wall_sec > 0.0)
+        ? static_cast<double>(stats.total_steps) / wall_sec : 0.0;
+    const double avg_len = (stats.num_walks > 0)
+        ? static_cast<double>(stats.total_steps) /
+              static_cast<double>(stats.num_walks)
+        : 0.0;
+
+    // --- Report — same format the harness has been parsing all along;
+    //     only the time figure inside Walks done changed (now wall time
+    //     around the whole walker invocation, matching Tempest).
+    std::printf("Walks scheduled:    %ld  (wpn=%d × active vertices)\n",
+                static_cast<long>(num_walks), args.num_walks_per_node);
     std::printf("Walks done:         %ld  (%.2f s)\n",
-                static_cast<long>(stats.num_walks), stats.elapsed_sec);
-    std::printf("Throughput:         %.3e walks/sec\n", stats.walks_per_sec());
-    std::printf("Steps/sec:          %.3e steps/sec\n", stats.steps_per_sec());
-    std::printf("Final avg walk length: %.2f\n",        stats.avg_walk_len());
+                static_cast<long>(stats.num_walks), wall_sec);
+    std::printf("Throughput:         %.3e walks/sec\n", walks_per_sec);
+    std::printf("Steps/sec:          %.3e steps/sec\n", steps_per_sec);
+    std::printf("Final avg walk length: %.2f\n",        avg_len);
     std::printf("Dead-at-start:      %ld\n",
                 static_cast<long>(stats.dead_at_start));
 }
@@ -141,14 +165,15 @@ void run_node2vec(const tea::TemporalGraph& g,
                 static_cast<double>(struct_mem) / 1e6,
                 std::chrono::duration<double>(t1 - t0).count());
 
+    // --- Wall-time bracket (matches Tempest's wall-time semantic).
+    const auto wall_t0 = std::chrono::steady_clock::now();
+
     // --- Starts + buffers
     const auto starts = make_all_nodes_starts(g, args.num_walks_per_node);
     const int64_t num_walks    = static_cast<int64_t>(starts.size());
     const int64_t output_slots = num_walks * args.max_walk_len;
     std::vector<NodeStep> walks_out(static_cast<std::size_t>(output_slots));
     std::vector<int32_t>  walk_lens_out(static_cast<std::size_t>(num_walks));
-    std::printf("Walks scheduled:    %zu  (wpn=%d × active vertices)\n",
-                starts.size(), args.num_walks_per_node);
 
     // --- Run walks
     WalkRunStats stats;
@@ -170,11 +195,26 @@ void run_node2vec(const tea::TemporalGraph& g,
                                         walk_lens_out.data());
     }
 
+    const auto wall_t1 = std::chrono::steady_clock::now();
+    const double wall_sec =
+        std::chrono::duration<double>(wall_t1 - wall_t0).count();
+
+    const double walks_per_sec = (wall_sec > 0.0)
+        ? static_cast<double>(stats.num_walks) / wall_sec : 0.0;
+    const double steps_per_sec = (wall_sec > 0.0)
+        ? static_cast<double>(stats.total_steps) / wall_sec : 0.0;
+    const double avg_len = (stats.num_walks > 0)
+        ? static_cast<double>(stats.total_steps) /
+              static_cast<double>(stats.num_walks)
+        : 0.0;
+
+    std::printf("Walks scheduled:    %ld  (wpn=%d × active vertices)\n",
+                static_cast<long>(num_walks), args.num_walks_per_node);
     std::printf("Walks done:         %ld  (%.2f s)\n",
-                static_cast<long>(stats.num_walks), stats.elapsed_sec);
-    std::printf("Throughput:         %.3e walks/sec\n", stats.walks_per_sec());
-    std::printf("Steps/sec:          %.3e steps/sec\n", stats.steps_per_sec());
-    std::printf("Final avg walk length: %.2f\n",        stats.avg_walk_len());
+                static_cast<long>(stats.num_walks), wall_sec);
+    std::printf("Throughput:         %.3e walks/sec\n", walks_per_sec);
+    std::printf("Steps/sec:          %.3e steps/sec\n", steps_per_sec);
+    std::printf("Final avg walk length: %.2f\n",        avg_len);
 }
 
 }  // namespace
