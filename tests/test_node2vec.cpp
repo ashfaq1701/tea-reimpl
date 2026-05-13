@@ -310,11 +310,16 @@ TEST(Node2VecSampler, ExtremeQBiasesAwayFromFarVertices) {
         ASSERT_NE(it, targets.end());
         ++counts[it - targets.begin()];
     }
-    // targets are {1, 2, 3, 4, 5}. Indices 0 (v=1) and 1 (v=2) are 1's
-    // neighbors / returning. Indices 2,3,4 are "far". Combined far-mass
-    // should be small (< 30% with q=100 and exp decay).
-    const int64_t close_mass = counts[0] + counts[1];
-    const int64_t far_mass   = counts[2] + counts[3] + counts[4];
+    // targets_of(0) is DESC-sorted by t: targets = [5, 4, 3, 2, 1].
+    //   idx 0 → v=5 (far,  β=1/q)
+    //   idx 1 → v=4 (far,  β=1/q)
+    //   idx 2 → v=3 (far,  β=1/q)
+    //   idx 3 → v=2 (close, β=1 — neighbour of prev=1)
+    //   idx 4 → v=1 (close, β=1/p — returning to prev)
+    // With q=100, far edges should be biased away from; close mass should
+    // dominate the accepted distribution.
+    const int64_t close_mass = counts[3] + counts[4];
+    const int64_t far_mass   = counts[0] + counts[1] + counts[2];
     EXPECT_GT(close_mass, far_mass * 2)
         << "Expected close mass >> far mass; got close=" << close_mass
         << " far=" << far_mass;

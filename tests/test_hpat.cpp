@@ -364,7 +364,9 @@ TEST(SamplerHpat, ExponentialDistribution) {
     tea::ExponentialBias bias;
     hpat.build(g, bias);
     auto p = analytic_probs(g, bias, 0);
-    EXPECT_GT(p[0], p[1]);
+    // Under forward-walk semantics the oldest edge (last in DESC list)
+    // carries the highest weight.
+    EXPECT_LT(p[0], p[1]);
     distribution_check_hpat(g, hpat, bias, 0, -1, 300000, 0x4444, p, 0);
 }
 
