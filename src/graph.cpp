@@ -1,6 +1,15 @@
-// TemporalGraph::build implementation.
+// TemporalGraph::build implementation — inbound-CSR build for backward
+// temporal walks.
 //
-// Performance notes (post-Phase-1 review):
+// For directed graphs: each (u, v, t) input edge produces one stored entry
+// under vertex v's adjacency, with target=u (the source) and ts=t.  A
+// backward walker at v with t_prev < t can pick this entry to step to u.
+//
+// For undirected graphs: each (u, v, t) adds entries to BOTH u's and v's
+// adjacencies, each with the OTHER vertex as the stored target.
+//
+// Performance notes (post-Phase-1 review, preserved across the
+// outbound→inbound refactor):
 //   - Degree count is parallelized via OpenMP `atomic update` rather than
 //     thread-local histograms because the histogram-then-reduce pattern
 //     costs O(T·N) memory which is wasteful for our N≈1M, T≈16 case
@@ -65,20 +74,24 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
         offsets_.assign(1, 0);
         targets_.clear();
         timestamps_.clear();
-        min_incoming_t_.clear();
         std::vector<Edge>().swap(edges);
         return;
     }
 
     // 2. Parallel degree count via atomic update.
+    //    Directed:   each (u, v, t) contributes to v's slot count.
+    //    Undirected: each contributes to both u's and v's slot counts.
     std::vector<int64_t> degree(n, 0);
     const auto E = edges.size();
     #pragma omp parallel for schedule(static, 4096)
     for (std::size_t i = 0; i < E; ++i) {
         const Edge& e = edges[i];
-        #pragma omp atomic update
-        ++degree[e.u];
-        if (!is_directed) {
+        if (is_directed) {
+            #pragma omp atomic update
+            ++degree[e.v];
+        } else {
+            #pragma omp atomic update
+            ++degree[e.u];
             #pragma omp atomic update
             ++degree[e.v];
         }
@@ -100,29 +113,36 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
     timestamps_.assign(total, 0);
 
     // 5. Parallel scatter via atomic capture on per-vertex cursor.
-    //    The cursor is reused as scratch (we don't need it after this pass).
+    //    Directed:   (u, v, t) → at v's slot: target=u, ts=t.
+    //    Undirected: also at u's slot: target=v, ts=t.
     std::vector<int64_t> cursor(n, 0);
     #pragma omp parallel for schedule(static, 4096)
     for (std::size_t i = 0; i < E; ++i) {
         const Edge& e = edges[i];
-        int64_t slot;
+        // Always store the inbound side for v (directed) or one of the
+        // two sides for undirected.
+        int64_t slot_v;
         #pragma omp atomic capture
-        slot = cursor[e.u]++;
-        const int64_t pos = offsets_[e.u] + slot;
-        targets_[pos]    = e.v;
-        timestamps_[pos] = e.t;
+        slot_v = cursor[e.v]++;
+        const int64_t pos_v = offsets_[e.v] + slot_v;
+        targets_[pos_v]    = e.u;
+        timestamps_[pos_v] = e.t;
         if (!is_directed) {
-            int64_t slot2;
+            int64_t slot_u;
             #pragma omp atomic capture
-            slot2 = cursor[e.v]++;
-            const int64_t pos2 = offsets_[e.v] + slot2;
-            targets_[pos2]    = e.u;
-            timestamps_[pos2] = e.t;
+            slot_u = cursor[e.u]++;
+            const int64_t pos_u = offsets_[e.u] + slot_u;
+            targets_[pos_u]    = e.v;
+            timestamps_[pos_u] = e.t;
         }
     }
 
-    // 6. Per-vertex time-descending sort via zip-and-sort.
+    // 6. Per-vertex time-ASCENDING sort via zip-and-sort.
     //    Thread-local scratch reused across vertices (no per-vertex alloc).
+    //    Ascending order makes the backward-walk candidate set
+    //    Γ_{t_prev}(v) = {t < t_prev} a contiguous PREFIX [0, L) of the
+    //    adjacency list, which matches PAT/HPAT's prefix-based trunk
+    //    decomposition.
     #pragma omp parallel
     {
         std::vector<TsTgtPair> zip;
@@ -142,7 +162,7 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
 
             std::sort(zip.data(), zip.data() + d,
                 [](const TsTgtPair& a, const TsTgtPair& b) {
-                    return a.ts > b.ts;  // DESCENDING
+                    return a.ts < b.ts;  // ASCENDING
                 });
 
             for (int64_t i = 0; i < d; ++i) {
@@ -152,34 +172,7 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
         }
     }
 
-    // 7. Per-vertex minimum incoming timestamp (paper §3.3 opt #1).
-    //    Single-threaded sweep over the CSR: for each (u, v, t), record t
-    //    as an incoming-time candidate for v.  E*1ns ≈ tens of ms on real
-    //    graphs — atomic-min in parallel adds contention overhead and isn't
-    //    a meaningful win over serial here.  Vertices without incoming
-    //    edges keep kSentinelStartTimestamp = INT64_MIN.
-    min_incoming_t_.assign(n, kSentinelStartTimestamp);
-    {
-        // First pass: bump every incoming target to a positive sentinel
-        // (anything larger than any real ts).  We then track the actual min
-        // by lazy initialisation on first observed incoming edge.
-        // Simpler: just walk all edges and update a per-vertex tracker.
-        std::vector<bool> seen(n, false);
-        for (int32_t u = 0; u < n; ++u) {
-            const int64_t lo = offsets_[u];
-            const int64_t hi = offsets_[u + 1];
-            for (int64_t i = lo; i < hi; ++i) {
-                const int32_t v = targets_[i];
-                const int64_t t = timestamps_[i];
-                if (!seen[v] || t < min_incoming_t_[v]) {
-                    min_incoming_t_[v] = t;
-                    seen[v] = true;
-                }
-            }
-        }
-    }
-
-    // 8. Drop the input edges. Releases ~16 bytes × E of memory.
+    // 7. Drop the input edges. Releases ~16 bytes × E of memory.
     std::vector<Edge>().swap(edges);
 }
 

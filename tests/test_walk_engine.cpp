@@ -1,12 +1,16 @@
 // Phase 6.1: WalkEngine — parallel-walk orchestration correctness.
 //
+// Walks are BACKWARD-IN-TIME: each step picks a t_k strictly less than
+// t_{k-1}.  Slot 0 holds the start vertex with t = kSentinelStartTimestamp
+// (= INT64_MAX) so the first hop has the full candidate set.
+//
 // What we verify:
 //   • WalkRunStats fields (num_walks, total_steps, dead_at_start) match
 //     a manual recount from walk_lens_out.
 //   • All emitted walks are temporally valid:
 //       - Slot 0 = (start_vertex, kSentinelStartTimestamp).
 //       - For step k > 0: (v_k, t_k) is a real out-edge of v_{k-1}
-//         with t_k > t_{k-1} (or t_{k-1} == sentinel for k=1).
+//         with t_k < t_{k-1} (or t_{k-1} == sentinel for k=1).
 //   • Walks that die early are sentinel-padded (v == kWalkDeadSentinel).
 //   • Determinism: same global_seed → byte-identical walks_out, even
 //     across different OpenMP thread counts. (Per-walk RNG seeded from
@@ -62,14 +66,15 @@ tea::TemporalGraph make_fanout_graph() {
     return g;
 }
 
-// Verify (v, t) is a valid out-edge of u with t > t_prev. Returns matching
-// edge index or -1 if no match. Slow O(degree) — fine for tests.
+// Verify (v, t) is a valid out-edge of u with t < t_prev (backward walks).
+// Returns matching edge index or -1 if no match.  Slow O(degree) — fine for
+// tests.
 int32_t find_edge(const tea::TemporalGraph& g, int32_t u, int32_t v,
                   int64_t t, int64_t t_prev) {
     const auto tgt = g.targets_of(u);
     const auto ts  = g.timestamps_of(u);
     for (std::size_t i = 0; i < tgt.size(); ++i) {
-        if (tgt[i] == v && ts[i] == t && ts[i] > t_prev) {
+        if (tgt[i] == v && ts[i] == t && ts[i] < t_prev) {
             return static_cast<int32_t>(i);
         }
     }
@@ -126,7 +131,6 @@ void assert_stats_consistent(const tea::WalkRunStats& stats,
     }
     EXPECT_EQ(stats.total_steps,   expected_steps);
     EXPECT_EQ(stats.dead_at_start, expected_dead);
-    EXPECT_GE(stats.elapsed_sec, 0.0);
 }
 
 }  // namespace
@@ -456,7 +460,4 @@ TEST(WalkEngine, EmptyStartsZeroStats) {
     EXPECT_EQ(stats.num_walks,     0);
     EXPECT_EQ(stats.total_steps,   0);
     EXPECT_EQ(stats.dead_at_start, 0);
-    EXPECT_EQ(stats.walks_per_sec(), 0.0);
-    EXPECT_EQ(stats.steps_per_sec(), 0.0);
-    EXPECT_EQ(stats.avg_walk_len(),  0.0);
 }

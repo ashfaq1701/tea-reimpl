@@ -12,7 +12,7 @@ namespace tea {
 
 // A trunk in HPAT: level k (trunk size = 2^k), index i within that level
 // (i-th trunk of size 2^k, covering edges [i·2^k, (i+1)·2^k) of u's
-// time-DESC edge list).
+// time-ASC edge list).
 struct TrunkRef {
     int32_t level;
     int32_t index;
