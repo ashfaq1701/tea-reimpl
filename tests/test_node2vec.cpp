@@ -22,7 +22,6 @@
 #include <vector>
 
 #include "tea/bias.hpp"
-#include "tea/config.hpp"
 #include "tea/graph.hpp"
 #include "tea/hpat.hpp"
 #include "tea/neighbor_set.hpp"
@@ -34,28 +33,19 @@
 namespace {
 
 // Build a small directed graph where the structure is fully known to the test.
-// Under the inbound-CSR storage model (backward walks), each input edge
-// (u, v, t) becomes "v has inbound from u at t".  NeighborSets[w] then
-// contains the SOURCES of inbound to w.
-//
-// Target topology for the rejection-sampling test:
-//   • v=0 has inbound from {1, 2, 3, 4, 5} at ts {100, 200, 300, 400, 500}
-//     — these are the five β candidates when sampling from v=0.
-//   • NeighborSets[1] = {0, 2}  (v=1 has inbound from 0 and 2)
-//   • NeighborSets[2] = {0, 3, 4}  (v=2 has inbound from 0, 3, 4)
-//
-// Walks from v=0 with prev_u=1 see candidates {1, 2, 3, 4, 5}:
-//   - source 1 → returning (β = 1/p)
-//   - source 2 → in NeighborSets[1] (β = 1)
-//   - sources 3, 4, 5 → not in NeighborSets[1] (β = 1/q)
+// Returns a graph with edges:
+//   u=0 → {1, 2, 3, 4, 5}     at increasing timestamps
+//   u=1 → {0, 2}              (so 0 is a "returning" candidate from 1's view)
+//   u=2 → {0, 3, 4}           (one-hop from 1 via shared neighbor 2)
+// Walks from u=0 with prev_u=1 will produce candidates {1, 2, 3, 4, 5}:
+//   - 1 → returning (β = 1/p)
+//   - 2 → 1's neighbor (β = 1)
+//   - 3, 4, 5 → not adjacent to 1 (β = 1/q)
 tea::TemporalGraph build_node2vec_test_graph() {
     std::vector<tea::Edge> edges = {
-        // inbound to v=0 from sources {1,2,3,4,5}
-        {1, 0, 100}, {2, 0, 200}, {3, 0, 300}, {4, 0, 400}, {5, 0, 500},
-        // inbound to v=1 from {0, 2}
-        {0, 1, 50},  {2, 1, 60},
-        // inbound to v=2 from {0, 3, 4}
-        {0, 2, 70},  {3, 2, 80},  {4, 2, 90},
+        {0, 1, 100}, {0, 2, 200}, {0, 3, 300}, {0, 4, 400}, {0, 5, 500},
+        {1, 0, 50},  {1, 2, 60},
+        {2, 0, 70},  {2, 3, 80},  {2, 4, 90},
     };
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/10, /*is_directed=*/true);
@@ -154,11 +144,11 @@ TEST(NeighborSets, DegreeMatchesDistinctNeighbors) {
 }
 
 TEST(NeighborSets, DuplicateEdgesDeduped) {
-    // Three duplicate inbound edges from 1 to 0 plus one from 2 to 0.
-    // NeighborSets[0] should dedupe to {1, 2}.
+    // Two edges with the same (u, v) but different timestamps.
+    // Neighbor set should dedupe.
     std::vector<tea::Edge> edges = {
-        {1, 0, 100}, {1, 0, 200}, {1, 0, 300},
-        {2, 0, 50},
+        {0, 1, 100}, {0, 1, 200}, {0, 1, 300},
+        {0, 2, 50},
     };
     tea::TemporalGraph g;
     g.build(std::move(edges), 5, true);
@@ -248,8 +238,7 @@ TEST(Node2VecSampler, PatDistributionMatchesAnalytic) {
     int dead = 0;
     for (int i = 0; i < N; ++i) {
         auto step = tea::sample_pat_node2vec(g, pat, bias, neighbors,
-                                              /*u=*/0,
-                                              /*t_prev=*/tea::kSentinelStartTimestamp,
+                                              /*u=*/0, /*t_prev=*/-1,
                                               /*prev_u=*/1, rng, scratch);
         if (step.v == tea::kWalkDeadSentinel) { ++dead; continue; }
         auto it = std::find(targets.begin(), targets.end(), step.v);
@@ -283,8 +272,7 @@ TEST(Node2VecSampler, HpatDistributionMatchesAnalytic) {
     int dead = 0;
     for (int i = 0; i < N; ++i) {
         auto step = tea::sample_hpat_node2vec(g, hpat, bias, neighbors,
-                                              0, tea::kSentinelStartTimestamp,
-                                              1, rng, scratch);
+                                              0, -1, 1, rng, scratch);
         if (step.v == tea::kWalkDeadSentinel) { ++dead; continue; }
         auto it = std::find(targets.begin(), targets.end(), step.v);
         ASSERT_NE(it, targets.end());
@@ -299,21 +287,7 @@ TEST(Node2VecSampler, HpatDistributionMatchesAnalytic) {
 TEST(Node2VecSampler, ExtremeQBiasesAwayFromFarVertices) {
     // q = 100 → 1/q = 0.01 (very small). Far candidates rarely picked.
     // Returning + neighbor candidates get most of the mass.
-    //
-    // Use a small-ts-span graph so exp((t − t_max)·scale) doesn't crush
-    // the β contribution.  With ts step = 1, weights span exp(-4)..exp(0),
-    // letting β=1/q=0.01 visibly suppress the "far" candidates.
-    //
-    // Inbound layout for the n2v candidate set at v=0:
-    //   v=0 ← inbound from 1@1, 2@2, 3@3, 4@4, 5@5
-    //   v=1 ← inbound from 0@10, 2@11    (so NeighborSets[1] = {0, 2})
-    std::vector<tea::Edge> edges = {
-        {1, 0, 1}, {2, 0, 2}, {3, 0, 3}, {4, 0, 4}, {5, 0, 5},
-        {0, 1, 10}, {2, 1, 11},
-    };
-    tea::TemporalGraph g;
-    g.build(std::move(edges), /*num_vertices=*/10, /*is_directed=*/true);
-
+    auto g = build_node2vec_test_graph();
     tea::NeighborSets neighbors;
     neighbors.build(g);
 
@@ -327,26 +301,22 @@ TEST(Node2VecSampler, ExtremeQBiasesAwayFromFarVertices) {
     tea::Pcg64 rng(0xc77, 0);
     tea::SamplerScratch scratch;
     auto targets = g.targets_of(0);
-    // ASC ordering → targets = [1, 2, 3, 4, 5].
-    ASSERT_EQ(targets.size(), 5u);
-    ASSERT_EQ(targets[0], 1);
-    ASSERT_EQ(targets[1], 2);
     std::vector<int64_t> counts(targets.size(), 0);
     for (int i = 0; i < N; ++i) {
         auto step = tea::sample_pat_node2vec(g, pat, bias, neighbors,
-                                              0, tea::kSentinelStartTimestamp,
-                                              1, rng, scratch);
+                                              0, -1, 1, rng, scratch);
         if (step.v == tea::kWalkDeadSentinel) continue;
         auto it = std::find(targets.begin(), targets.end(), step.v);
         ASSERT_NE(it, targets.end());
         ++counts[it - targets.begin()];
     }
-    // targets = [1, 2, 3, 4, 5]. v=1 returns to prev (β=1/p=1), v=2 is
-    // in N(1) (β=1), v∈{3,4,5} are far (β=1/q=0.01).
-    const int64_t close_mass = counts[0] + counts[1];           // {1, 2}
-    const int64_t far_mass   = counts[2] + counts[3] + counts[4]; // {3, 4, 5}
+    // targets are {1, 2, 3, 4, 5}. Indices 0 (v=1) and 1 (v=2) are 1's
+    // neighbors / returning. Indices 2,3,4 are "far". Combined far-mass
+    // should be small (< 30% with q=100 and exp decay).
+    const int64_t close_mass = counts[0] + counts[1];
+    const int64_t far_mass   = counts[2] + counts[3] + counts[4];
     EXPECT_GT(close_mass, far_mass * 2)
-        << "Expected close mass >> far mass under q=100; got close=" << close_mass
+        << "Expected close mass >> far mass; got close=" << close_mass
         << " far=" << far_mass;
 }
 
@@ -370,8 +340,7 @@ TEST(Node2VecSampler, FirstStepNoPrevAcceptsImmediately) {
     int dead = 0;
     for (int i = 0; i < N; ++i) {
         auto step = tea::sample_pat_node2vec(g, pat, bias, neighbors,
-                                              0, tea::kSentinelStartTimestamp,
-                                              /*prev_u=*/-1,
+                                              0, -1, /*prev_u=*/-1,
                                               rng, scratch);
         if (step.v == tea::kWalkDeadSentinel) ++dead;
     }

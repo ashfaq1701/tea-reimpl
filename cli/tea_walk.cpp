@@ -39,6 +39,11 @@ void run_non_node2vec(const tea::TemporalGraph& g,
     const char* disable_aux_env = std::getenv("TEA_DISABLE_AUX");
     const bool  disable_aux     = disable_aux_env && disable_aux_env[0] == '1';
     const std::size_t aux_budget = disable_aux ? 0 : kAuxIndexMaxBytes;
+    // TEA paper §3.3 first ad-hoc optimization: start the walk with
+    // t_prev = min_incoming_time(u) instead of the sentinel.
+    const char* temporal_start_env = std::getenv("TEA_TEMPORAL_START");
+    const bool  use_temporal_start =
+        temporal_start_env && temporal_start_env[0] == '1';
 
     auto t0 = std::chrono::steady_clock::now();
     Pat<BiasT>  pat;
@@ -59,14 +64,9 @@ void run_non_node2vec(const tea::TemporalGraph& g,
                 static_cast<double>(struct_mem) / 1e6, struct_secs,
                 aux_active ? "on" : "off");
 
-    // --- Wall-time bracket (matches Tempest's wall-time semantic).
-    //     Tempest brackets EVERYTHING inside get_random_walks_and_times_*:
-    //     start-vertex list construction (repeated_node_ids), output
-    //     buffer cudaMalloc, walk kernels + sync, D2H copy.  TEA's
-    //     analog includes the same kinds of work it has to do:
-    //     make_all_nodes_starts, output vector<> allocation, the
-    //     OpenMP walk loop.  TEA writes to host memory directly, so
-    //     it has no D2H copy to include.
+    // --- Wall-time bracket (matches tea-reimpl/master and Tempest's wall
+    //     semantic: includes start-list build + output-buffer allocation
+    //     + walk loop; excludes graph + PAT/HPAT build).
     const auto wall_t0 = std::chrono::steady_clock::now();
 
     // --- Build start-vertex list
@@ -89,13 +89,15 @@ void run_non_node2vec(const tea::TemporalGraph& g,
                                 static_cast<int32_t>(num_walks),
                                 args.max_walk_len,
                                 /*global_seed=*/0xc0ffee'd00d'd00dULL,
-                                walks_out.data(), walk_lens_out.data());
+                                walks_out.data(), walk_lens_out.data(),
+                                use_temporal_start);
     } else {
         stats = run_walks_pat(g, pat, bias, starts.data(),
                                static_cast<int32_t>(num_walks),
                                args.max_walk_len,
                                /*global_seed=*/0xc0ffee'd00d'd00dULL,
-                               walks_out.data(), walk_lens_out.data());
+                               walks_out.data(), walk_lens_out.data(),
+                               use_temporal_start);
     }
 
     const auto wall_t1 = std::chrono::steady_clock::now();
@@ -106,21 +108,15 @@ void run_non_node2vec(const tea::TemporalGraph& g,
         ? static_cast<double>(stats.num_walks) / wall_sec : 0.0;
     const double steps_per_sec = (wall_sec > 0.0)
         ? static_cast<double>(stats.total_steps) / wall_sec : 0.0;
-    const double avg_len = (stats.num_walks > 0)
-        ? static_cast<double>(stats.total_steps) /
-              static_cast<double>(stats.num_walks)
-        : 0.0;
 
-    // --- Report — same format the harness has been parsing all along;
-    //     only the time figure inside Walks done changed (now wall time
-    //     around the whole walker invocation, matching Tempest).
+    // --- Report — same format as before, time is now wall-bracketed.
     std::printf("Walks scheduled:    %ld  (wpn=%d × active vertices)\n",
                 static_cast<long>(num_walks), args.num_walks_per_node);
     std::printf("Walks done:         %ld  (%.2f s)\n",
                 static_cast<long>(stats.num_walks), wall_sec);
     std::printf("Throughput:         %.3e walks/sec\n", walks_per_sec);
     std::printf("Steps/sec:          %.3e steps/sec\n", steps_per_sec);
-    std::printf("Final avg walk length: %.2f\n",        avg_len);
+    std::printf("Final avg walk length: %.2f\n",        stats.avg_walk_len());
     std::printf("Dead-at-start:      %ld\n",
                 static_cast<long>(stats.dead_at_start));
 }
@@ -148,6 +144,9 @@ void run_node2vec(const tea::TemporalGraph& g,
     const char* disable_aux_env = std::getenv("TEA_DISABLE_AUX");
     const bool  disable_aux     = disable_aux_env && disable_aux_env[0] == '1';
     const std::size_t aux_budget = disable_aux ? 0 : kAuxIndexMaxBytes;
+    const char* temporal_start_env = std::getenv("TEA_TEMPORAL_START");
+    const bool  use_temporal_start =
+        temporal_start_env && temporal_start_env[0] == '1';
 
     t0 = std::chrono::steady_clock::now();
     Pat<Node2VecBias>  pat;
@@ -165,7 +164,7 @@ void run_node2vec(const tea::TemporalGraph& g,
                 static_cast<double>(struct_mem) / 1e6,
                 std::chrono::duration<double>(t1 - t0).count());
 
-    // --- Wall-time bracket (matches Tempest's wall-time semantic).
+    // --- Wall-time bracket (matches the non-node2vec path).
     const auto wall_t0 = std::chrono::steady_clock::now();
 
     // --- Starts + buffers
@@ -184,7 +183,8 @@ void run_node2vec(const tea::TemporalGraph& g,
                                          args.max_walk_len,
                                          0xc0ffee'd00d'd00dULL,
                                          walks_out.data(),
-                                         walk_lens_out.data());
+                                         walk_lens_out.data(),
+                                         use_temporal_start);
     } else {
         stats = run_walks_pat_node2vec(g, pat, bias, neighbors,
                                         starts.data(),
@@ -192,7 +192,8 @@ void run_node2vec(const tea::TemporalGraph& g,
                                         args.max_walk_len,
                                         0xc0ffee'd00d'd00dULL,
                                         walks_out.data(),
-                                        walk_lens_out.data());
+                                        walk_lens_out.data(),
+                                        use_temporal_start);
     }
 
     const auto wall_t1 = std::chrono::steady_clock::now();
@@ -203,10 +204,6 @@ void run_node2vec(const tea::TemporalGraph& g,
         ? static_cast<double>(stats.num_walks) / wall_sec : 0.0;
     const double steps_per_sec = (wall_sec > 0.0)
         ? static_cast<double>(stats.total_steps) / wall_sec : 0.0;
-    const double avg_len = (stats.num_walks > 0)
-        ? static_cast<double>(stats.total_steps) /
-              static_cast<double>(stats.num_walks)
-        : 0.0;
 
     std::printf("Walks scheduled:    %ld  (wpn=%d × active vertices)\n",
                 static_cast<long>(num_walks), args.num_walks_per_node);
@@ -214,7 +211,7 @@ void run_node2vec(const tea::TemporalGraph& g,
                 static_cast<long>(stats.num_walks), wall_sec);
     std::printf("Throughput:         %.3e walks/sec\n", walks_per_sec);
     std::printf("Steps/sec:          %.3e steps/sec\n", steps_per_sec);
-    std::printf("Final avg walk length: %.2f\n",        avg_len);
+    std::printf("Final avg walk length: %.2f\n",        stats.avg_walk_len());
 }
 
 }  // namespace

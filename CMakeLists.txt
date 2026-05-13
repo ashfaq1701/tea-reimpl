@@ -59,10 +59,6 @@ target_link_libraries(tea
 add_executable(tea_walk cli/tea_walk.cpp)
 target_link_libraries(tea_walk PRIVATE tea tea_compile_flags)
 
-# Strict end-to-end walk verifier (causal + edge-existence assertions).
-add_executable(tea_verify_walks cli/tea_verify_walks.cpp)
-target_link_libraries(tea_verify_walks PRIVATE tea tea_compile_flags)
-
 # --- Tests ------------------------------------------------------------------
 if(TEA_BUILD_TESTS)
     enable_testing()

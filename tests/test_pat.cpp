@@ -27,19 +27,17 @@
 namespace {
 
 tea::TemporalGraph build_test_graph() {
-    // 5 "main" vertices with varying inbound-degree (the backward-walks
-    // adjacency).  Flip src/dst from the original fan-out layout so
-    // vertices 0..4 receive the inbound edges:
-    //   v=0:  10 inbound  (medium)
-    //   v=1: 100 inbound  (high; multiple trunks)
-    //   v=2:   1 inbound  (low; one trunk, padded by min_trunk_size)
-    //   v=3:   0 inbound
-    //   v=4:   4 inbound  (just below min_trunk_size)
+    // 5 vertices, varying out-degree:
+    //   v=0: 10 edges (medium)
+    //   v=1: 100 edges (high; will have multiple trunks)
+    //   v=2: 1 edge (low; one trunk, padded by min_trunk_size)
+    //   v=3: 0 edges
+    //   v=4: 4 edges (just below min_trunk_size)
     std::vector<tea::Edge> edges;
-    for (int i = 0; i < 10;  ++i) edges.push_back({100 + i, 0, 1000 + i});
-    for (int i = 0; i < 100; ++i) edges.push_back({200 + i, 1, 2000 + i});
-    edges.push_back({300, 2, 3000});
-    for (int i = 0; i < 4; ++i) edges.push_back({400 + i, 4, 4000 + i});
+    for (int i = 0; i < 10;  ++i) edges.push_back({0, 100 + i, 1000 + i});
+    for (int i = 0; i < 100; ++i) edges.push_back({1, 200 + i, 2000 + i});
+    edges.push_back({2, 300, 3000});
+    for (int i = 0; i < 4; ++i) edges.push_back({4, 400 + i, 4000 + i});
 
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/500, /*is_directed=*/true);
@@ -118,7 +116,7 @@ TEST(PatBuild, BiasParamsAreStored) {
     tea::Pat<tea::ExponentialBias> pat;
     pat.build(g, bias);
 
-    // v=0 has 10 edges with ts in 1000..1009. After time-asc sort: t_max=1009.
+    // v=0 has 10 edges with ts in 1000..1009. After time-desc sort: t_max=1009.
     const auto& p0 = pat.bias_params_of(0);
     EXPECT_DOUBLE_EQ(p0.t_pivot, 1009.0);
     EXPECT_DOUBLE_EQ(p0.scale, 1.0);
@@ -205,19 +203,16 @@ TEST(PatBuild, ParallelBuildIsDeterministic) {
 }
 
 TEST(PatBuild, ExpBiasTrunkTotalsReflectTimeOrdering) {
-    // Under time-ASC storage, the LAST trunk (newest edges) should have
-    // the largest weight under ExpBias — exp(t_max − t_max) = 1 lives at
-    // the end, exp((older t) − t_max) ≪ 1 lives at the start.
+    // The first trunk (newest edges) should have the largest weight under
+    // ExpBias — because exp(t_max − t_max) = 1 and exp((older t) − t_max) ≪ 1.
     auto g = build_test_graph();
     tea::Pat<tea::ExponentialBias> pat;
     pat.build(g, tea::ExponentialBias{});
 
     auto cs = pat.trunk_cumsums_of(1);  // v=1, 10 trunks of 10 edges each
     ASSERT_GE(cs.size(), 2u);
-    // Trunk 0 total = cs[0]; last trunk total = cs[K-1] - cs[K-2].
-    const std::size_t K = cs.size();
-    const double t_first = cs[0];
-    const double t_last  = cs[K - 1] - cs[K - 2];
-    EXPECT_GT(t_last, t_first)
-        << "newest trunk (asc-list end) should have higher total weight than the oldest";
+    // Trunk 0 total = cs[0]; trunk 1 total = cs[1] - cs[0]
+    const double t0 = cs[0];
+    const double t1 = cs[1] - cs[0];
+    EXPECT_GT(t0, t1) << "newest trunk should have higher total weight than next";
 }

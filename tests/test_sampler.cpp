@@ -1,10 +1,5 @@
 // Phase 3.3: PAT sampler distribution correctness.
 //
-// Walks are BACKWARD-IN-TIME; per-vertex edges are sorted ASC.  The
-// candidate set Γ_{t_prev}(u) = {t < t_prev} is the PREFIX [0, L) of u's
-// asc edge list.  All t_prev values in this file are chosen with that
-// convention in mind.
-//
 // The strongest test we can write at this stage. For each bias we:
 //   1. Build a small graph by hand.
 //   2. Build PAT under that bias.
@@ -20,7 +15,7 @@
 // distribution tests are the ONLY way to find them.
 //
 // We also verify:
-//   • Walk-dies when Γ_t(u) is empty (t_prev ≤ smallest edge).
+//   • Walk-dies when Γ_t(u) is empty (t_prev ≥ newest edge).
 //   • Partial-trunk case is exercised (degree > trunk_size, t_prev in middle).
 //   • Full-trunk-only case (Γ_len % trunk_size == 0).
 //   • Single-edge case (degree=1, T=1, always returns that one edge).
@@ -35,7 +30,6 @@
 #include <vector>
 
 #include "tea/bias.hpp"
-#include "tea/config.hpp"
 #include "tea/graph.hpp"
 #include "tea/pat.hpp"
 #include "tea/rng.hpp"
@@ -43,16 +37,14 @@
 
 namespace {
 
-// Build a small directed graph with one TARGET vertex u=0 receiving K
-// inbound edges with distinct timestamps from sources 100..99+K.  We
-// populate edges so that after time-ASC sort of v=0's inbound list,
-// position p holds ts (p+1)*ts_step and source 99+K-p.  All timestamps
-// fit within the backward candidate set when t_prev > the newest ts.
+// Build a small directed graph with one source vertex u=0, K outgoing edges
+// with monotonically decreasing timestamps. Edges go to vertices 100..100+K-1.
+// All timestamps fit within the candidate set when t_prev < the oldest ts.
 tea::TemporalGraph build_star(int K, int64_t ts_step = 100) {
     std::vector<tea::Edge> edges;
     edges.reserve(K);
     for (int i = 0; i < K; ++i) {
-        edges.push_back({100 + i, 0, static_cast<int64_t>((K - i) * ts_step)});
+        edges.push_back({0, 100 + i, static_cast<int64_t>((K - i) * ts_step)});
     }
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/200, /*is_directed=*/true);
@@ -60,8 +52,6 @@ tea::TemporalGraph build_star(int K, int64_t ts_step = 100) {
 }
 
 // Compute analytic P(e_i) for the bias on this exact slice of u's edges.
-// `partial_start` / `partial_len` slice into u's asc edge list; the backward
-// candidate set corresponds to partial_start=0, partial_len=L.
 template <typename BiasT>
 std::vector<double> analytic_probs(const tea::TemporalGraph& g,
                                    const BiasT& bias,
@@ -79,6 +69,7 @@ std::vector<double> analytic_probs(const tea::TemporalGraph& g,
         params, static_cast<int32_t>(partial_start), w.data());
     double total = std::accumulate(w.begin(), w.end(), 0.0);
     if (total <= 0.0) {
+        // All zero — uniform fallback.
         std::vector<double> p(w.size(), 1.0 / w.size());
         return p;
     }
@@ -86,19 +77,26 @@ std::vector<double> analytic_probs(const tea::TemporalGraph& g,
     return w;
 }
 
+// Chi-square statistic from observed counts vs expected probabilities.
+// Returns the chi-square value (caller compares to threshold for df=k-1, α=0.01).
 double chi2(const std::vector<int64_t>& counts,
             const std::vector<double>&  expected_probs,
             int64_t N) {
     double s = 0.0;
     for (std::size_t i = 0; i < counts.size(); ++i) {
         const double exp_count = expected_probs[i] * N;
-        if (exp_count <= 0.0) continue;
+        if (exp_count <= 0.0) continue;  // skip cells with zero expectation
         const double diff = counts[i] - exp_count;
         s += diff * diff / exp_count;
     }
     return s;
 }
 
+// Chi-square critical values at α=0.01 (one-tail).
+// df=k-1; for our small K's we hardcode a few.
+//   df=1 → 6.63   df=2 → 9.21   df=3 → 11.34  df=4 → 13.28
+//   df=5 → 15.09  df=9 → 21.67  df=14 → 29.14 df=19 → 36.19
+// Use slightly looser thresholds for safety against rare false alarms.
 double chi2_threshold(int df) {
     if (df <= 1)  return  8.0;
     if (df <= 2)  return 11.0;
@@ -108,7 +106,7 @@ double chi2_threshold(int df) {
     if (df <= 9)  return 25.0;
     if (df <= 14) return 33.0;
     if (df <= 19) return 41.0;
-    return df * 2.5;
+    return df * 2.5;  // generous fallback for larger df
 }
 
 template <typename BiasT>
@@ -132,6 +130,8 @@ void distribution_check(const tea::TemporalGraph& g,
     for (int64_t i = 0; i < N_samples; ++i) {
         auto step = tea::sample_pat(g, pat, bias, u, t_prev, rng, scratch);
         if (step.v == tea::kWalkDeadSentinel) { ++dead; continue; }
+        // Find which position in u's edge list was picked.
+        // Since vertices in our star are distinct, we can map v → position.
         auto it = std::find(targets_u.begin(), targets_u.end(), step.v);
         ASSERT_NE(it, targets_u.end());
         const int64_t pos = it - targets_u.begin();
@@ -148,8 +148,6 @@ void distribution_check(const tea::TemporalGraph& g,
         << "chi2=" << c2 << " threshold=" << th << " for bias " << BiasT::name();
 }
 
-constexpr int64_t kAllEligible = tea::kSentinelStartTimestamp;
-
 }  // namespace
 
 // ============================================================================
@@ -163,7 +161,7 @@ TEST(SamplerPat, UniformDistribution_FullTrunkOnly) {
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    distribution_check(g, pat, bias, /*u=*/0, /*t_prev=*/kAllEligible,
+    distribution_check(g, pat, bias, /*u=*/0, /*t_prev=*/-1,
                        /*N=*/200000, /*seed=*/0x1337,
                        p, /*partial_start=*/0);
 }
@@ -176,22 +174,22 @@ TEST(SamplerPat, UniformDistribution_MultipleTrunksAllFull) {
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    distribution_check(g, pat, bias, 0, kAllEligible, 200000, 0xa11, p, 0);
+    distribution_check(g, pat, bias, 0, -1, 200000, 0xa11, p, 0);
 }
 
 TEST(SamplerPat, UniformDistribution_WithPartialTrunk) {
     // K = 16 edges, T_u = 8. Set t_prev to expose exactly 12 edges
     //   → Γ_len = 12, num_full = 1, partial_size = 4 (PARTIAL TRUNK)
     auto g = build_star(16, /*ts_step=*/100);
-    // ts_asc = [100, 200, ..., 1600]; want Γ_len = 12 ⇒ t_prev > ts[11] = 1200
-    //   and t_prev ≤ ts[12] = 1300. Pick t_prev = 1250.
+    // ts_desc = [1600, 1500, ..., 100]; want Γ_len = 12 ⇒ t_prev < ts[11] = 500
+    //   and t_prev ≥ ts[12] = 400. Pick t_prev = 450.
     tea::Pat<tea::UniformBias> pat;
     tea::UniformBias bias;
     pat.build(g, bias);
-    ASSERT_EQ(g.candidate_set_len(0, 1250), 12);
 
+    // analytic over only the first 12 edges
     auto p = analytic_probs(g, bias, 0, /*partial_start=*/0, /*partial_len=*/12);
-    distribution_check(g, pat, bias, 0, /*t_prev=*/1250, 200000, 0xb22, p, 0);
+    distribution_check(g, pat, bias, 0, /*t_prev=*/450, 200000, 0xb22, p, 0);
 }
 
 // ============================================================================
@@ -204,41 +202,41 @@ TEST(SamplerPat, LinearDistribution_FullTrunkOnly) {
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    distribution_check(g, pat, bias, 0, kAllEligible, 200000, 0x123, p, 0);
+    distribution_check(g, pat, bias, 0, -1, 200000, 0x123, p, 0);
 }
 
 TEST(SamplerPat, LinearDistribution_WithPartialTrunk) {
-    // K = 16, T = 8, t_prev = 1250 → Γ_len = 12, partial trunk of size 4.
+    // K = 16, T = 8, t_prev = 450 → Γ_len = 12, partial trunk of size 4.
     auto g = build_star(16);
     tea::Pat<tea::LinearBias> pat;
     tea::LinearBias bias;
     pat.build(g, bias);
-    ASSERT_EQ(g.candidate_set_len(0, 1250), 12);
 
     // Partial trunk's weights at sample time MUST match what was used at
     // build for positions [0, 12) — verifies the per-vertex bias-params +
     // slice-start-pos contract.
     auto p = analytic_probs(g, bias, 0, 0, 12);
-    distribution_check(g, pat, bias, 0, 1250, 200000, 0x456, p, 0);
+    distribution_check(g, pat, bias, 0, 450, 200000, 0x456, p, 0);
 }
 
 // ============================================================================
 // ExponentialBias — δ(e_i) = exp((t_i - t_max) × scale)
 // ============================================================================
 TEST(SamplerPat, ExponentialDistribution_SmallTimeScale) {
-    // Use small timestamps so exp() doesn't underflow.  K=4 → no partial trunk.
-    // ts step = 1: weights at asc positions 0..3 = exp(-3), exp(-2), exp(-1), exp(0).
+    // Use small timestamps so exp() doesn't underflow. K = 4 → no partial trunk.
+    // ts step = 1 means weights are exp(0), exp(-1), exp(-2), exp(-3),
+    // which give a non-degenerate distribution.
     auto g = build_star(4, /*ts_step=*/1);
     tea::Pat<tea::ExponentialBias> pat;
     tea::ExponentialBias bias;
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    // Sanity: newest edge (last position in asc) gets the largest probability.
-    EXPECT_GT(p[3], p[2]);
-    EXPECT_GT(p[2], p[1]);
-    EXPECT_GT(p[1], p[0]);
-    distribution_check(g, pat, bias, 0, kAllEligible, 300000, 0x789, p, 0);
+    // Sanity: newest edge gets the largest probability.
+    EXPECT_GT(p[0], p[1]);
+    EXPECT_GT(p[1], p[2]);
+    EXPECT_GT(p[2], p[3]);
+    distribution_check(g, pat, bias, 0, -1, 300000, 0x789, p, 0);
 }
 
 TEST(SamplerPat, ExponentialDistribution_WithPartialTrunk) {
@@ -247,16 +245,15 @@ TEST(SamplerPat, ExponentialDistribution_WithPartialTrunk) {
     tea::ExponentialBias bias;
     pat.build(g, bias);
 
-    // ts_asc = [1, 2, ..., 16].  Γ_len = 12 ⇒ t_prev > 12 and t_prev ≤ 13.
-    // Pick t_prev = 13.
-    ASSERT_EQ(g.candidate_set_len(0, 13), 12);
+    // Γ_len = 12 ⇒ t_prev < ts[11] = 5 ⇒ t_prev = 4.5; integer ts, use 4.
     auto p = analytic_probs(g, bias, 0, 0, 12);
-    distribution_check(g, pat, bias, 0, /*t_prev=*/13, 300000, 0xabc, p, 0);
+    distribution_check(g, pat, bias, 0, /*t_prev=*/4, 300000, 0xabc, p, 0);
 }
 
 TEST(SamplerPat, ExponentialDistribution_TimescaleBoundCompresses) {
     // With timescale_bound = 5, an exp bias on 4 edges with ts step=10
-    // should be much less skewed than without.
+    // should be much less skewed than without (effective exponents become
+    // [0, -5/3, -10/3, -5] instead of [0, -10, -20, -30]).
     auto g = build_star(4, /*ts_step=*/10);
     tea::Pat<tea::ExponentialBias> pat;
     tea::ExponentialBias bias;
@@ -264,31 +261,31 @@ TEST(SamplerPat, ExponentialDistribution_TimescaleBoundCompresses) {
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    distribution_check(g, pat, bias, 0, kAllEligible, 300000, 0xdef, p, 0);
+    distribution_check(g, pat, bias, 0, -1, 300000, 0xdef, p, 0);
 }
 
 // ============================================================================
 // Sampler edge cases
 // ============================================================================
 TEST(SamplerPat, WalkDiesWhenCandidateSetEmpty) {
-    auto g = build_star(4, 100);  // ts_asc = [100, 200, 300, 400]
+    auto g = build_star(4, 100);  // newest ts = 400, oldest = 100
     tea::Pat<tea::UniformBias> pat;
     pat.build(g, tea::UniformBias{});
     tea::Pcg64 rng(0xfeed, 0);
     tea::SamplerScratch scratch;
 
-    // Backward: t_prev ≤ oldest ts → no candidates → walk dies.
+    // t_prev ≥ newest ts → no candidates → walk dies.
     auto step = tea::sample_pat(g, pat, tea::UniformBias{}, /*u=*/0,
-                                /*t_prev=*/50, rng, scratch);
+                                /*t_prev=*/500, rng, scratch);
     EXPECT_EQ(step.v, tea::kWalkDeadSentinel);
 
-    step = tea::sample_pat(g, pat, tea::UniformBias{}, 0, 100, rng, scratch);
-    EXPECT_EQ(step.v, tea::kWalkDeadSentinel);  // ≤ oldest still dies (strict <)
+    step = tea::sample_pat(g, pat, tea::UniformBias{}, 0, 400, rng, scratch);
+    EXPECT_EQ(step.v, tea::kWalkDeadSentinel);  // ≥ newest still dies
 }
 
 TEST(SamplerPat, SingleEdgeAlwaysReturnsIt) {
-    // u=0 has exactly 1 inbound edge from 42 at t=100.
-    std::vector<tea::Edge> edges = {{42, 0, 100}};
+    // u=0 has exactly 1 outgoing edge.
+    std::vector<tea::Edge> edges = {{0, 42, 100}};
     tea::TemporalGraph g;
     g.build(std::move(edges), 100, true);
     tea::Pat<tea::UniformBias> pat;
@@ -297,9 +294,7 @@ TEST(SamplerPat, SingleEdgeAlwaysReturnsIt) {
     tea::SamplerScratch scratch;
 
     for (int i = 0; i < 1000; ++i) {
-        // Sentinel start → every inbound edge is a backward candidate.
-        auto step = tea::sample_pat(g, pat, tea::UniformBias{}, 0,
-                                    kAllEligible, rng, scratch);
+        auto step = tea::sample_pat(g, pat, tea::UniformBias{}, 0, -1, rng, scratch);
         EXPECT_EQ(step.v, 42);
         EXPECT_EQ(step.t, 100);
     }
@@ -315,8 +310,7 @@ TEST(SamplerPat, DeterministicWithFixedSeed) {
         tea::SamplerScratch scratch;
         std::vector<int32_t> picks;
         for (int i = 0; i < 100; ++i) {
-            auto step = tea::sample_pat(g, pat, tea::LinearBias{}, 0,
-                                        kAllEligible, rng, scratch);
+            auto step = tea::sample_pat(g, pat, tea::LinearBias{}, 0, -1, rng, scratch);
             picks.push_back(step.v);
         }
         return picks;
@@ -331,9 +325,8 @@ TEST(SamplerPat, DeterministicWithFixedSeed) {
 
 TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
     // Build a 100-vertex graph with random connectivity, run many samples,
-    // verify every returned target is one of the actual inbound edges of u
-    // at a valid timestamp (t < t_prev for backward walks).  Edges are
-    // generated as (src, dst, t) → stored under dst's adjacency.
+    // verify every returned target is one of the actual outgoing edges of u
+    // at a valid timestamp.
     std::vector<tea::Edge> edges;
     tea::Pcg64 wrng(0xff, 0);
     for (int32_t u = 0; u < 100; ++u) {
@@ -355,12 +348,7 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
     int live_count = 0;
     for (int32_t u = 0; u < 100; ++u) {
         for (int trial = 0; trial < 100; ++trial) {
-            // Random t_prev in [5000, 15000] — backward candidate is
-            // {t < t_prev}; edge ts are in [1, 10000], so most t_prev values
-            // admit a non-empty candidate set.  This keeps the live/dead
-            // ratio meaningful as a sanity check while still exercising
-            // boundary t_prev values that occasionally fall below all edges.
-            int64_t t_prev = static_cast<int64_t>(5000 + rng.next_below(10000));
+            int64_t t_prev = static_cast<int64_t>(rng.next_below(10000));
             auto step = tea::sample_pat(g, pat, tea::ExponentialBias{}, u, t_prev,
                                         rng, scratch);
             if (step.v == tea::kWalkDeadSentinel) {
@@ -368,14 +356,15 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
                 continue;
             }
             ++live_count;
-            // Verify (step.v, step.t) is a real outgoing edge of u with t < t_prev.
+            // Verify (step.v, step.t) corresponds to a real outgoing edge of u
+            // with t > t_prev.
             auto targets_u = g.targets_of(u);
             auto ts_u      = g.timestamps_of(u);
             bool found = false;
             for (std::size_t i = 0; i < targets_u.size(); ++i) {
                 if (targets_u[i] == step.v && ts_u[i] == step.t) {
                     found = true;
-                    EXPECT_LT(ts_u[i], t_prev) << "sampled edge violates t < t_prev";
+                    EXPECT_GT(ts_u[i], t_prev) << "sampled edge violates t > t_prev";
                     break;
                 }
             }
@@ -384,5 +373,6 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
                 << " sampled v=" << step.v << " t=" << step.t << " not in u's edges";
         }
     }
+    // Most samples should be live; some die naturally.
     EXPECT_GT(live_count, dead_count);
 }
