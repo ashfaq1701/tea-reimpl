@@ -2,7 +2,7 @@
 //
 //   P((u, v_i, t_i)) = β_(w, v_i) × δ(e_i) / Σ_{e_j ∈ Γ_t(u)} δ(e_j)
 //
-// where δ is the same exp((t_min_u − t) × scale) used by ExponentialBias
+// where δ is the same exp((t − t_max_u) × scale) used by ExponentialBias
 // (the "static-weight trick" — the t_cur cancellation makes weights static
 // after preprocess), and β depends on the walker's previous vertex w:
 //

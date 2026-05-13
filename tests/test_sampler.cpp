@@ -220,23 +220,22 @@ TEST(SamplerPat, LinearDistribution_WithPartialTrunk) {
 }
 
 // ============================================================================
-// ExponentialBias — δ(e_i) = exp((t_min − t_i) × scale)
+// ExponentialBias — δ(e_i) = exp((t_i - t_max) × scale)
 // ============================================================================
 TEST(SamplerPat, ExponentialDistribution_SmallTimeScale) {
     // Use small timestamps so exp() doesn't underflow. K = 4 → no partial trunk.
-    // ts step = 1 means weights are exp(-3), exp(-2), exp(-1), exp(0)
-    // for positions 0..3 (DESC sort, t_min at position 3), a non-degenerate
-    // distribution peaked at the oldest edge.
+    // ts step = 1 means weights are exp(0), exp(-1), exp(-2), exp(-3),
+    // which give a non-degenerate distribution.
     auto g = build_star(4, /*ts_step=*/1);
     tea::Pat<tea::ExponentialBias> pat;
     tea::ExponentialBias bias;
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    // Sanity: oldest edge gets the largest probability (forward-walk semantic).
-    EXPECT_LT(p[0], p[1]);
-    EXPECT_LT(p[1], p[2]);
-    EXPECT_LT(p[2], p[3]);
+    // Sanity: newest edge gets the largest probability.
+    EXPECT_GT(p[0], p[1]);
+    EXPECT_GT(p[1], p[2]);
+    EXPECT_GT(p[2], p[3]);
     distribution_check(g, pat, bias, 0, -1, 300000, 0x789, p, 0);
 }
 
@@ -328,23 +327,13 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
     // Build a 100-vertex graph with random connectivity, run many samples,
     // verify every returned target is one of the actual outgoing edges of u
     // at a valid timestamp.
-    //
-    // Timestamp range is bounded to [1, 200] so the unscaled exp((t_min − t))
-    // weights stay representable in float64.  Under the forward-walk pivot
-    // (t_min), the candidate prefix typically *excludes* t_min, so the
-    // largest weight in the prefix lives at the prefix's end; with a wide
-    // unix-scale span every weight in the prefix would underflow to 0 and
-    // every walk would die.  Using a 200-wide window keeps exp(-200)≈1e-87
-    // — small but representable — which is the regime PAT/HPAT was designed
-    // to handle.  Real-data runs use timescale_bound > 0 for the same
-    // reason (Tempest-compat).
     std::vector<tea::Edge> edges;
     tea::Pcg64 wrng(0xff, 0);
     for (int32_t u = 0; u < 100; ++u) {
         int n_edges = 1 + (wrng.next_below(30));  // [1, 30]
         for (int i = 0; i < n_edges; ++i) {
             int32_t v = static_cast<int32_t>(wrng.next_below(100));
-            int64_t t = static_cast<int64_t>(1 + wrng.next_below(200));
+            int64_t t = static_cast<int64_t>(1 + wrng.next_below(10000));
             edges.push_back({u, v, t});
         }
     }
@@ -359,7 +348,7 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
     int live_count = 0;
     for (int32_t u = 0; u < 100; ++u) {
         for (int trial = 0; trial < 100; ++trial) {
-            int64_t t_prev = static_cast<int64_t>(rng.next_below(200));
+            int64_t t_prev = static_cast<int64_t>(rng.next_below(10000));
             auto step = tea::sample_pat(g, pat, tea::ExponentialBias{}, u, t_prev,
                                         rng, scratch);
             if (step.v == tea::kWalkDeadSentinel) {

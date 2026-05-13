@@ -1,9 +1,7 @@
 // Phase 2.2 (post-review): Bias correctness + numerical-stability tests.
 //
-// Forward-walk semantics (matches Tempest):
-//   • Linear: rank = position+1 in DESC list → smallest-t edge wins.
-//   • Exponential: exp((t_min − t) × scale) → smallest-t edge wins,
-//     no overflow on unix-timestamp data.
+// Updated for the proper-TEA correction:
+//   • ExpBias default uses exp(t − t_max), NOT a rescale.
 //   • timescale_bound > 0 enables Tempest-compat temperature scaling.
 
 #include <cmath>
@@ -63,14 +61,14 @@ TEST(UniformBias, PartialTrunkUseCase) {
 }
 
 // ============================================================================
-// LinearBias — δ(e) = rank, newest = 1, oldest = D  (forward-walk semantics)
+// LinearBias — δ(e) = rank, newest = D, oldest = 1
 // ============================================================================
 TEST(LinearBias, RankPattern) {
     tea::LinearBias b;
     auto w = compute(b, {300, 200, 100});  // ts_desc, ts=300 is newest
-    EXPECT_DOUBLE_EQ(w[0], 1.0);
+    EXPECT_DOUBLE_EQ(w[0], 3.0);
     EXPECT_DOUBLE_EQ(w[1], 2.0);
-    EXPECT_DOUBLE_EQ(w[2], 3.0);
+    EXPECT_DOUBLE_EQ(w[2], 1.0);
 }
 
 TEST(LinearBias, InvariantUnderAffineTimeShift) {
@@ -99,14 +97,12 @@ TEST(LinearBias, PartialTrunkConsistentWithFullBuild) {
     auto params = b.compute_per_vertex_params(
         tea::span<const int64_t>(ts_desc.data(), ts_desc.size()));
 
-    // Full weights (build time): [1, 2, 3, 4, 5]  (rank = position + 1)
+    // Full weights (build time): [5, 4, 3, 2, 1]
     std::vector<double> w_full(5, 0.0);
     b.compute_weights(tea::span<const int64_t>(ts_desc.data(), ts_desc.size()),
                       params, 0, w_full.data());
-    EXPECT_DOUBLE_EQ(w_full[0], 1.0);
-    EXPECT_DOUBLE_EQ(w_full[4], 5.0);
 
-    // Sub-range positions [2, 5) — should give [3, 4, 5] matching w_full[2:5].
+    // Sub-range positions [2, 5) — should give [3, 2, 1] matching w_full[2:5].
     std::vector<double> w_sub(3, 0.0);
     tea::span<const int64_t> sub(ts_desc.data() + 2, 3);
     b.compute_weights(sub, params, 2, w_sub.data());
@@ -116,43 +112,40 @@ TEST(LinearBias, PartialTrunkConsistentWithFullBuild) {
 }
 
 // ============================================================================
-// ExponentialBias — δ(e) = exp((t_min − t) × scale), softmax peaked at oldest
+// ExponentialBias — δ(e) = exp((t − t_max) × scale), softmax of t
 // ============================================================================
-TEST(ExponentialBias, OldestGetsWeightOne) {
-    // δ(e_oldest) = exp(t_min − t_min) = exp(0) = 1. Never overflows.
-    // Newer edges have weight < 1 (exponent negative).
+TEST(ExponentialBias, NewestGetsWeightOne) {
+    // δ(e_newest) = exp(t_max − t_max) = exp(0) = 1. Never overflows.
     tea::ExponentialBias b;  // default timescale_bound = -1 → proper TEA
     auto w = compute(b, {300, 200, 100});
-    EXPECT_DOUBLE_EQ(w[2], 1.0);
-    EXPECT_LT(w[0], w[1]);
-    EXPECT_LT(w[1], w[2]);
+    EXPECT_DOUBLE_EQ(w[0], 1.0);
+    EXPECT_LT(w[1], w[0]);
+    EXPECT_LT(w[2], w[1]);
 }
 
 TEST(ExponentialBias, MonotoneInTimestamp) {
     tea::ExponentialBias b;
     auto w = compute(b, {500, 400, 300, 200, 100});
     for (std::size_t i = 1; i < w.size(); ++i) {
-        EXPECT_LT(w[i - 1], w[i]) << "weights should be monotone increasing "
-                                     "with position (smallest-t wins)";
+        EXPECT_GT(w[i - 1], w[i]) << "weights should be monotone decreasing";
     }
 }
 
 TEST(ExponentialBias, ExactValuesFor4PointInput) {
-    // Hand-check: ts_desc = [10, 7, 4, 1], t_min = 1.
-    // weights = [exp(1-10), exp(1-7), exp(1-4), exp(0)]
-    //         = [exp(-9),  exp(-6),  exp(-3),  exp(0)]
+    // Hand-check: ts_desc = [10, 7, 4, 1], t_max = 10.
+    // weights = [exp(0), exp(-3), exp(-6), exp(-9)]
     tea::ExponentialBias b;
     auto w = compute(b, {10, 7, 4, 1});
-    EXPECT_NEAR(w[0], std::exp(-9.0), 1e-12);
-    EXPECT_NEAR(w[1], std::exp(-6.0), 1e-12);
-    EXPECT_NEAR(w[2], std::exp(-3.0), 1e-12);
-    EXPECT_NEAR(w[3], std::exp(0.0),  1e-12);
+    EXPECT_NEAR(w[0], std::exp(0.0),  1e-12);
+    EXPECT_NEAR(w[1], std::exp(-3.0), 1e-12);
+    EXPECT_NEAR(w[2], std::exp(-6.0), 1e-12);
+    EXPECT_NEAR(w[3], std::exp(-9.0), 1e-12);
 }
 
 TEST(ExponentialBias, NoOverflowOnUnixSecondTimestamps) {
     // tgbl-comment ts range was [1.13e9, 1.29e9]. Verify no NaN/inf.
-    // Pivoting at t_min keeps every exponent ≤ 0 → largest weight is 1 (at
-    // the oldest edge), newer edges underflow to 0 for huge spans — OK.
+    // With proper TEA exp((t − t_max)), the largest weight is 1, smallest
+    // is exp(-span) which underflows to 0 for huge spans — that's OK.
     tea::ExponentialBias b;
     std::vector<int64_t> ts_desc;
     ts_desc.reserve(1000);
@@ -162,7 +155,7 @@ TEST(ExponentialBias, NoOverflowOnUnixSecondTimestamps) {
         ts_desc.push_back(t0 + span - i * (span / 999));
     }
     auto w = compute(b, ts_desc);
-    EXPECT_DOUBLE_EQ(w[ts_desc.size() - 1], 1.0);  // oldest pinned at exp(0)
+    EXPECT_DOUBLE_EQ(w[0], 1.0);
     for (double x : w) {
         EXPECT_FALSE(std::isnan(x));
         EXPECT_FALSE(std::isinf(x));
@@ -171,8 +164,8 @@ TEST(ExponentialBias, NoOverflowOnUnixSecondTimestamps) {
     }
 }
 
-TEST(ExponentialBias, NewerEdgesUnderflowToZeroOnLongSpan) {
-    // 7-year span in unix seconds → newer-edge weights should underflow.
+TEST(ExponentialBias, OldEdgesUnderflowToZeroOnLongSpan) {
+    // 7-year span in unix seconds → oldest weight should underflow.
     // This is correct behavior — exp(-2e8) is genuinely zero in float64.
     tea::ExponentialBias b;
     std::vector<int64_t> ts_desc = {
@@ -181,9 +174,9 @@ TEST(ExponentialBias, NewerEdgesUnderflowToZeroOnLongSpan) {
         1'000'000'000LL,
     };
     auto w = compute(b, ts_desc);
-    EXPECT_DOUBLE_EQ(w[0], 0.0);  // exp(-7e8)
-    EXPECT_DOUBLE_EQ(w[1], 0.0);  // exp(-4e8)
-    EXPECT_DOUBLE_EQ(w[2], 1.0);  // exp(0) — oldest is pinned
+    EXPECT_DOUBLE_EQ(w[0], 1.0);
+    EXPECT_DOUBLE_EQ(w[1], 0.0);  // exp(-3e8)
+    EXPECT_DOUBLE_EQ(w[2], 0.0);  // exp(-7e8)
 }
 
 TEST(ExponentialBias, ConstantTimestampsProduceUniform) {
@@ -198,18 +191,17 @@ TEST(ExponentialBias, ConstantTimestampsProduceUniform) {
 TEST(ExponentialBias, TimescaleBoundCompresses) {
     // Tempest-compat mode: timescale_bound = 80 rescales per-vertex span
     // to span 80 in the exponent. ts in [100, 500] becomes exponent in
-    // [-80, 0] regardless of the unix scale.  Pivot is t_min=100, so:
-    // exponent at position i = (t_min - ts[i]) * scale, where scale=80/400=0.2.
-    // ts_desc = [500, 400, 300, 200, 100] →
-    // exponents  = [-80, -60, -40, -20, 0].
+    // [-80, 0] regardless of the unix scale.
     tea::ExponentialBias b;
     b.timescale_bound = 80.0;
     auto w = compute(b, {500, 400, 300, 200, 100});  // span = 400
-    EXPECT_NEAR(w[0], std::exp(-80.0), 1e-30);
-    EXPECT_NEAR(w[1], std::exp(-60.0), 1e-25);
+    // Newest at exponent 0, oldest at exponent -80.
+    EXPECT_NEAR(w[0], 1.0,             1e-12);
+    EXPECT_NEAR(w[4], std::exp(-80.0), 1e-30);
+    // Intermediate values should follow the scaled-span pattern.
+    EXPECT_NEAR(w[1], std::exp(-20.0), 1e-15);
     EXPECT_NEAR(w[2], std::exp(-40.0), 1e-20);
-    EXPECT_NEAR(w[3], std::exp(-20.0), 1e-15);
-    EXPECT_NEAR(w[4], 1.0,             1e-12);
+    EXPECT_NEAR(w[3], std::exp(-60.0), 1e-25);
 }
 
 TEST(ExponentialBias, TimescaleBoundChangesDistribution) {
