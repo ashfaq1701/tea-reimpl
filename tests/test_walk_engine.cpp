@@ -461,3 +461,99 @@ TEST(WalkEngine, EmptyStartsZeroStats) {
     EXPECT_EQ(stats.total_steps,   0);
     EXPECT_EQ(stats.dead_at_start, 0);
 }
+
+// -----------------------------------------------------------------------------
+// 11. Early termination only when the candidate set is actually empty.
+//
+// Port of Tempest's `WalkTerminalEdgesTest`
+// (temporal-random-walk/temporal_random_walk/test/test_temporal_random_walk.cpp
+//  :295-366), adapted for tea-reimpl's backward-walks-on-inbound-CSR
+// semantics.
+//
+// Invariant: every walk with `walk_len < max_walk_len` did so because
+// Γ_{t_prev_last}(u_last) was empty — i.e., the inbound edge list of the
+// last visited vertex contains no entry with timestamp strictly less than
+// the walk's current t_prev.  If any such entry existed, the walker should
+// have taken it; an early break in the walk loop is a regression.
+//
+// Why exercise this with LinearBias specifically:
+//   The walk-loop break condition is `sample(...) == kWalkDeadSentinel`,
+//   which fires in two cases:
+//     (a) `candidate_set_len(u, t_prev) == 0`   — LEGITIMATE; this is
+//         the case the test asserts.
+//     (b) sum of bias weights over the candidate set is zero — a
+//         degenerate edge case that can only fire under ExponentialBias
+//         when every weight underflows (large unix span + timescale=-1).
+//   LinearBias weights are `position + 1 ∈ [1, D]`, never zero, never
+//   underflowing, so case (b) is unreachable here.  Any termination is
+//   therefore guaranteed to be case (a).
+// -----------------------------------------------------------------------------
+
+TEST(WalkEngine, EarlyTerminationOnlyWhenCandidateSetEmpty) {
+    auto g = make_fanout_graph();
+
+    tea::LinearBias bias;
+    tea::Hpat<tea::LinearBias> hpat;
+    hpat.build(g, bias);
+
+    // Use mwl considerably larger than the natural walk depth on this
+    // fixture (per-vertex inbound timestamps span a 30-unit slice; each
+    // backward hop cuts the candidate set, so walks die well before 80
+    // hops).  Including vertex 30 (degree 0) in the start set exercises
+    // the walk_len==1 edge of the invariant.
+    constexpr int32_t N = 1000;
+    constexpr int32_t L = 80;
+
+    std::vector<int32_t> starts(N);
+    for (int32_t i = 0; i < N; ++i) starts[i] = i % 31;  // includes v=30
+
+    std::vector<tea::NodeStep> out(static_cast<std::size_t>(N) * L);
+    std::vector<int32_t>       lens(N);
+
+    tea::run_walks_hpat(g, hpat, bias, starts.data(), N, L,
+                        0xbeef'd00d'cafeULL,
+                        out.data(), lens.data());
+
+    int early_terminations = 0;
+    int dead_at_start      = 0;
+    for (int32_t i = 0; i < N; ++i) {
+        const int32_t walk_len = lens[i];
+        if (walk_len >= L) continue;  // hit mwl — no claim about Γ.
+        ASSERT_GE(walk_len, 1)
+            << "walk " << i << " has walk_len=" << walk_len
+            << "; slot 0 should always be written.";
+
+        // Last entry in the walk.  For walk_len == 1, this is slot 0 —
+        // the start vertex at the sentinel timestamp; candidate_set_len
+        // there is u_start's full inbound degree, so the invariant reduces
+        // to "dead-at-start only when degree == 0".
+        const tea::NodeStep last =
+            out[static_cast<int64_t>(i) * L + (walk_len - 1)];
+        const int32_t u_last = last.v;
+        const int64_t t_prev = last.t;
+
+        const int64_t G = g.candidate_set_len(u_last, t_prev);
+        ASSERT_EQ(G, 0)
+            << "walk " << i << " terminated at step " << (walk_len - 1)
+            << " (vertex=" << u_last << ", t_prev=" << t_prev
+            << ", walk_len=" << walk_len << ") with " << G
+            << " admissible inbound edge(s) still satisfying t < t_prev. "
+               "Under LinearBias every non-empty candidate set has "
+               "non-zero total weight, so this is a regression in the "
+               "walk-loop termination logic.";
+
+        if (walk_len == 1) ++dead_at_start;
+        else               ++early_terminations;
+    }
+
+    // Cover both branches of the invariant: walks that died at the start
+    // (degree == 0) AND walks that took ≥ 1 hop and then ran out of past
+    // edges.  Without both we'd be silently testing only one half.
+    EXPECT_GT(dead_at_start, 0)
+        << "Fixture didn't include any dead-at-start vertices; the "
+           "walk_len == 1 branch of the invariant wasn't exercised.";
+    EXPECT_GT(early_terminations, 0)
+        << "No walk on this fixture terminated mid-walk — the main "
+           "branch of the invariant wasn't exercised.  L=" << L
+        << " may be too large or the fixture too dense.";
+}
