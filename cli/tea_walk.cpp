@@ -83,7 +83,12 @@ void run_non_node2vec(const tea::TemporalGraph& g,
     std::vector<int32_t>  walk_lens_out(static_cast<std::size_t>(num_walks));
 
     // --- Run walks
+    //     Inner bracket around just the run_walks_* call: pure walk-loop time
+    //     (no start-list build, no output-buffer allocation). The outer wall-
+    //     time bracket above is the Tempest-comparable figure; this inner
+    //     bracket isolates the walker hot loop for ablation use.
     WalkRunStats stats;
+    const auto walk_loop_t0 = std::chrono::steady_clock::now();
     if (args.variant == Variant::Hpat) {
         stats = run_walks_hpat(g, hpat, bias, starts.data(),
                                 static_cast<int32_t>(num_walks),
@@ -97,6 +102,9 @@ void run_non_node2vec(const tea::TemporalGraph& g,
                                /*global_seed=*/0xc0ffee'd00d'd00dULL,
                                walks_out.data(), walk_lens_out.data());
     }
+    const auto walk_loop_t1 = std::chrono::steady_clock::now();
+    const double walk_loop_sec =
+        std::chrono::duration<double>(walk_loop_t1 - walk_loop_t0).count();
 
     const auto wall_t1 = std::chrono::steady_clock::now();
     const double wall_sec =
@@ -106,6 +114,8 @@ void run_non_node2vec(const tea::TemporalGraph& g,
         ? static_cast<double>(stats.num_walks) / wall_sec : 0.0;
     const double steps_per_sec = (wall_sec > 0.0)
         ? static_cast<double>(stats.total_steps) / wall_sec : 0.0;
+    const double walk_loop_steps_per_sec = (walk_loop_sec > 0.0)
+        ? static_cast<double>(stats.total_steps) / walk_loop_sec : 0.0;
     const double avg_len = (stats.num_walks > 0)
         ? static_cast<double>(stats.total_steps) /
               static_cast<double>(stats.num_walks)
@@ -114,12 +124,17 @@ void run_non_node2vec(const tea::TemporalGraph& g,
     // --- Report — same format the harness has been parsing all along;
     //     only the time figure inside Walks done changed (now wall time
     //     around the whole walker invocation, matching Tempest).
+    //     New "Walk loop ..." lines are additive; existing parsers anchored
+    //     to "^Walks done:" / "^Steps/sec:" / "^Throughput:" are unaffected.
     std::printf("Walks scheduled:    %ld  (wpn=%d × active vertices)\n",
                 static_cast<long>(num_walks), args.num_walks_per_node);
     std::printf("Walks done:         %ld  (%.2f s)\n",
                 static_cast<long>(stats.num_walks), wall_sec);
     std::printf("Throughput:         %.3e walks/sec\n", walks_per_sec);
     std::printf("Steps/sec:          %.3e steps/sec\n", steps_per_sec);
+    std::printf("Walk loop time:     %.2f s\n", walk_loop_sec);
+    std::printf("Walk loop steps/sec: %.3e steps/sec\n",
+                walk_loop_steps_per_sec);
     std::printf("Final avg walk length: %.2f\n",        avg_len);
     std::printf("Dead-at-start:      %ld\n",
                 static_cast<long>(stats.dead_at_start));
@@ -176,7 +191,12 @@ void run_node2vec(const tea::TemporalGraph& g,
     std::vector<int32_t>  walk_lens_out(static_cast<std::size_t>(num_walks));
 
     // --- Run walks
+    //     Inner bracket around just the run_walks_*_node2vec call: pure walk-
+    //     loop time (no start-list build, no output-buffer allocation). The
+    //     outer wall-time bracket above is the Tempest-comparable figure;
+    //     this inner bracket isolates the walker hot loop for ablation use.
     WalkRunStats stats;
+    const auto walk_loop_t0 = std::chrono::steady_clock::now();
     if (args.variant == Variant::Hpat) {
         stats = run_walks_hpat_node2vec(g, hpat, bias, neighbors,
                                          starts.data(),
@@ -194,6 +214,9 @@ void run_node2vec(const tea::TemporalGraph& g,
                                         walks_out.data(),
                                         walk_lens_out.data());
     }
+    const auto walk_loop_t1 = std::chrono::steady_clock::now();
+    const double walk_loop_sec =
+        std::chrono::duration<double>(walk_loop_t1 - walk_loop_t0).count();
 
     const auto wall_t1 = std::chrono::steady_clock::now();
     const double wall_sec =
@@ -203,6 +226,8 @@ void run_node2vec(const tea::TemporalGraph& g,
         ? static_cast<double>(stats.num_walks) / wall_sec : 0.0;
     const double steps_per_sec = (wall_sec > 0.0)
         ? static_cast<double>(stats.total_steps) / wall_sec : 0.0;
+    const double walk_loop_steps_per_sec = (walk_loop_sec > 0.0)
+        ? static_cast<double>(stats.total_steps) / walk_loop_sec : 0.0;
     const double avg_len = (stats.num_walks > 0)
         ? static_cast<double>(stats.total_steps) /
               static_cast<double>(stats.num_walks)
@@ -214,6 +239,9 @@ void run_node2vec(const tea::TemporalGraph& g,
                 static_cast<long>(stats.num_walks), wall_sec);
     std::printf("Throughput:         %.3e walks/sec\n", walks_per_sec);
     std::printf("Steps/sec:          %.3e steps/sec\n", steps_per_sec);
+    std::printf("Walk loop time:     %.2f s\n", walk_loop_sec);
+    std::printf("Walk loop steps/sec: %.3e steps/sec\n",
+                walk_loop_steps_per_sec);
     std::printf("Final avg walk length: %.2f\n",        avg_len);
 }
 
