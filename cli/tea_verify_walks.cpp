@@ -248,7 +248,7 @@ int run_node2vec(const tea::TemporalGraph& g,
     bias.timescale_bound = args.timescale_bound;
 
     NeighborSets neighbors;
-    neighbors.build(g);
+    neighbors.build(g, args.is_directed);
 
     const char* disable_aux_env = std::getenv("TEA_DISABLE_AUX");
     const bool  disable_aux     = disable_aux_env && disable_aux_env[0] == '1';

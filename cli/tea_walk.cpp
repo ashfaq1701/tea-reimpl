@@ -152,7 +152,7 @@ void run_node2vec(const tea::TemporalGraph& g,
     // --- Neighbor sets (Node2Vec-only — Phase 5 dep)
     auto t0 = std::chrono::steady_clock::now();
     NeighborSets neighbors;
-    neighbors.build(g);
+    neighbors.build(g, args.is_directed);
     auto t1 = std::chrono::steady_clock::now();
     std::printf("Neighbor sets:      %ld entries  (%.2f s, %.1f MB)\n",
                 static_cast<long>(neighbors.total_neighbor_count()),

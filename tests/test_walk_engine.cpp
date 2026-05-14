@@ -353,7 +353,7 @@ TEST(WalkEngine, PatNode2VecBasic) {
     auto g = make_fanout_graph();
 
     tea::NeighborSets neighbors;
-    neighbors.build(g);
+    neighbors.build(g, /*input_was_directed=*/true);
 
     tea::Node2VecBias bias;
     bias.p = 1.0;
@@ -389,7 +389,7 @@ TEST(WalkEngine, HpatNode2VecBasic) {
     auto g = make_fanout_graph();
 
     tea::NeighborSets neighbors;
-    neighbors.build(g);
+    neighbors.build(g, /*input_was_directed=*/true);
 
     tea::Node2VecBias bias;
     bias.p = 0.5;
