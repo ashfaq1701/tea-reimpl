@@ -1,15 +1,15 @@
 // Phase 1.4: TemporalGraph correctness tests.
 //
-// Walks are BACKWARD-IN-TIME and the graph stores INBOUND adjacency
+// Walks are FORWARD-IN-TIME and the graph stores OUTBOUND adjacency
 // (see graph.hpp): each directed input edge (u, v, t) becomes one entry
-// under vertex v with target=u (the source) and ts=t.  Undirected edges
-// add entries to both endpoints.  Per-vertex adjacency is sorted by
-// timestamp ASCENDING.
+// under vertex u with target=v (the destination) and ts=t.  Undirected
+// edges add entries to both endpoints.  Per-vertex adjacency is sorted
+// by timestamp DESCENDING.
 //
 // What we verify:
-//   - in-degree counts match the input
-//   - per-vertex adjacency is sorted time-ASCENDING
-//   - directed (u, v, t) stores at v's slot with target=u
+//   - out-degree counts match the input
+//   - per-vertex adjacency is sorted time-DESCENDING
+//   - directed (u, v, t) stores at u's slot with target=v
 //   - candidate_set_len(u, t_prev) returns the right prefix length for
 //     all the boundary cases
 //   - undirected mode duplicates edges in both directions
@@ -32,11 +32,11 @@ tea::TemporalGraph build_simple() {
     //   1 → 2 @ 50
     //   2 → 3 @ 40, 2 → 0 @ 25
     //
-    // Inbound adjacency (under directed):
-    //   v=0 ← {(2 @ 25)}                           in-degree 1
-    //   v=1 ← {(0 @ 10)}                           in-degree 1
-    //   v=2 ← {(0 @ 30), (1 @ 50)}                 in-degree 2
-    //   v=3 ← {(0 @ 20), (2 @ 40)}                 in-degree 2
+    // Outbound adjacency (under directed):
+    //   u=0 → {(1 @ 10), (2 @ 30), (3 @ 20)}         out-degree 3
+    //   u=1 → {(2 @ 50)}                              out-degree 1
+    //   u=2 → {(3 @ 40), (0 @ 25)}                    out-degree 2
+    //   u=3 → {}                                      out-degree 0
     std::vector<tea::Edge> edges = {
         {0, 1, 10}, {0, 2, 30}, {0, 3, 20},
         {1, 2, 50},
@@ -49,79 +49,81 @@ tea::TemporalGraph build_simple() {
 
 }  // namespace
 
-TEST(GraphTest, InDegreesAreCorrect) {
+TEST(GraphTest, OutDegreesAreCorrect) {
     auto g = build_simple();
-    EXPECT_EQ(g.degree(0), 1);  // only 2 → 0 @ 25
-    EXPECT_EQ(g.degree(1), 1);  // only 0 → 1 @ 10
-    EXPECT_EQ(g.degree(2), 2);  // 0 → 2 @ 30, 1 → 2 @ 50
-    EXPECT_EQ(g.degree(3), 2);  // 0 → 3 @ 20, 2 → 3 @ 40
+    EXPECT_EQ(g.degree(0), 3);  // 0→1@10, 0→2@30, 0→3@20
+    EXPECT_EQ(g.degree(1), 1);  // 1→2@50
+    EXPECT_EQ(g.degree(2), 2);  // 2→3@40, 2→0@25
+    EXPECT_EQ(g.degree(3), 0);  // no out-edges
     EXPECT_EQ(g.num_vertices(), 4);
     EXPECT_EQ(g.num_edges(),    6);
 }
 
-TEST(GraphTest, InboundEdgesSortedTimeAscending) {
+TEST(GraphTest, OutboundEdgesSortedTimeDescending) {
     auto g = build_simple();
     for (int32_t u = 0; u < g.num_vertices(); ++u) {
         auto ts = g.timestamps_of(u);
         for (std::size_t i = 1; i < ts.size(); ++i) {
-            EXPECT_LE(ts[i - 1], ts[i])
-                << "vertex " << u << " not sorted asc at index " << i;
+            EXPECT_GE(ts[i - 1], ts[i])
+                << "vertex " << u << " not sorted desc at index " << i;
         }
     }
-    // v=3 has inbound from {0 @ 20, 2 @ 40} → asc: ts=[20, 40], target=[0, 2]
-    auto ts3  = g.timestamps_of(3);
-    auto tgt3 = g.targets_of(3);
-    ASSERT_EQ(ts3.size(), 2u);
-    EXPECT_EQ(ts3[0],  20);  EXPECT_EQ(tgt3[0], 0);
-    EXPECT_EQ(ts3[1],  40);  EXPECT_EQ(tgt3[1], 2);
+    // u=0 has outbound {(1 @ 10), (3 @ 20), (2 @ 30)} → desc: ts=[30, 20, 10],
+    // target=[2, 3, 1].
+    auto ts0  = g.timestamps_of(0);
+    auto tgt0 = g.targets_of(0);
+    ASSERT_EQ(ts0.size(), 3u);
+    EXPECT_EQ(ts0[0],  30);  EXPECT_EQ(tgt0[0], 2);
+    EXPECT_EQ(ts0[1],  20);  EXPECT_EQ(tgt0[1], 3);
+    EXPECT_EQ(ts0[2],  10);  EXPECT_EQ(tgt0[2], 1);
 }
 
-TEST(GraphTest, DirectedStoresSourceAsTarget) {
-    // For input edge (u, v, t), v's adjacency must contain target=u, ts=t.
+TEST(GraphTest, DirectedStoresDestinationAsTarget) {
+    // For input edge (u, v, t), u's adjacency must contain target=v, ts=t.
     auto g = build_simple();
 
-    // v=2 ← {(0 @ 30), (1 @ 50)}; asc order: ts=[30, 50], target=[0, 1]
+    // u=2 → {(3 @ 40), (0 @ 25)}; desc order: ts=[40, 25], target=[3, 0]
     auto ts2  = g.timestamps_of(2);
     auto tgt2 = g.targets_of(2);
     ASSERT_EQ(ts2.size(), 2u);
-    EXPECT_EQ(ts2[0],  30);  EXPECT_EQ(tgt2[0], 0);
-    EXPECT_EQ(ts2[1],  50);  EXPECT_EQ(tgt2[1], 1);
+    EXPECT_EQ(ts2[0],  40);  EXPECT_EQ(tgt2[0], 3);
+    EXPECT_EQ(ts2[1],  25);  EXPECT_EQ(tgt2[1], 0);
 }
 
 TEST(GraphTest, CandidateSetBoundaryCases) {
     auto g = build_simple();
-    // v=3 has inbound ts_asc = {20, 40}; candidate = count of t < t_prev.
-    EXPECT_EQ(g.candidate_set_len(3, 15), 0);                          // nothing < 15
-    EXPECT_EQ(g.candidate_set_len(3, 20), 0);                          // strictly less
-    EXPECT_EQ(g.candidate_set_len(3, 21), 1);                          // only 20
-    EXPECT_EQ(g.candidate_set_len(3, 40), 1);                          // 20 only (40 excluded)
-    EXPECT_EQ(g.candidate_set_len(3, 41), 2);                          // 20, 40
-    EXPECT_EQ(g.candidate_set_len(3, tea::kSentinelStartTimestamp), 2); // sentinel start
+    // u=0 has outbound ts_desc = {30, 20, 10}; candidate = count of t > t_prev.
+    EXPECT_EQ(g.candidate_set_len(0, 35), 0);                          // nothing > 35
+    EXPECT_EQ(g.candidate_set_len(0, 30), 0);                          // strictly greater
+    EXPECT_EQ(g.candidate_set_len(0, 29), 1);                          // only 30
+    EXPECT_EQ(g.candidate_set_len(0, 10), 2);                          // 30, 20 (10 excluded)
+    EXPECT_EQ(g.candidate_set_len(0,  9), 3);                          // 30, 20, 10
+    EXPECT_EQ(g.candidate_set_len(0, tea::kSentinelStartTimestamp), 3); // sentinel start
 }
 
 TEST(GraphTest, DuplicateTimestampsHandled) {
-    // Three incoming edges to v=4 at the same timestamp.
+    // Three outgoing edges from u=4 at the same timestamp.
     std::vector<tea::Edge> edges = {
-        {0, 4, 100}, {1, 4, 100}, {2, 4, 100},
-        {3, 4, 200},
+        {4, 0, 100}, {4, 1, 100}, {4, 2, 100},
+        {4, 3, 200},
     };
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/5, /*is_directed=*/true);
 
-    // v=4 has 4 inbound: ts_asc = [100, 100, 100, 200]
+    // u=4 has 4 outbound: ts_desc = [200, 100, 100, 100]
     auto ts = g.timestamps_of(4);
     ASSERT_EQ(ts.size(), 4u);
-    EXPECT_EQ(ts[0], 100);
+    EXPECT_EQ(ts[0], 200);
     EXPECT_EQ(ts[1], 100);
     EXPECT_EQ(ts[2], 100);
-    EXPECT_EQ(ts[3], 200);
+    EXPECT_EQ(ts[3], 100);
 
-    // Boundary: t_prev=100 means "strictly earlier", so nothing < 100.
-    EXPECT_EQ(g.candidate_set_len(4, 100), 0);
-    // t_prev=101 includes all three 100's.
-    EXPECT_EQ(g.candidate_set_len(4, 101), 3);
-    // t_prev=201 includes everything.
-    EXPECT_EQ(g.candidate_set_len(4, 201), 4);
+    // Boundary: t_prev=100 means "strictly later", so nothing > 100 except 200.
+    EXPECT_EQ(g.candidate_set_len(4, 100), 1);
+    // t_prev=99 includes all four entries.
+    EXPECT_EQ(g.candidate_set_len(4,  99), 4);
+    // t_prev=200 includes nothing (must be strictly greater).
+    EXPECT_EQ(g.candidate_set_len(4, 200), 0);
 }
 
 TEST(GraphTest, UndirectedDuplicatesEachEdge) {

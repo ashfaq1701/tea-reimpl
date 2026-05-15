@@ -1,8 +1,8 @@
 // Sampler — per-step picker for a single walker. Paper §3.2 Algorithm 2
 // (PAT variant; HPAT variant adds a different inner trunk-finder in Phase 4).
 //
-// Direction: walks are BACKWARD-IN-TIME.  Candidate set is
-// Γ_{t_prev}(u) = {e : t < t_prev}, which is a PREFIX of the time-asc
+// Direction: walks are FORWARD-IN-TIME.  Candidate set is
+// Γ_{t_prev}(u) = {e : t > t_prev}, which is a PREFIX of the time-desc
 // per-vertex edge list.  The sampler logic is direction-agnostic — it
 // operates on a prefix [0, L) regardless of orientation.
 //
@@ -16,7 +16,7 @@
 //     per-call heap allocations.
 //
 // Hot-path budget (PAT, typical step):
-//   • 1× lower_bound on time-asc timestamps                (candidate-set length)
+//   • 1× lower_bound on time-desc timestamps               (candidate-set length)
 //   • 1× compute_per_vertex-bias call only at preprocess (already done at build)
 //   • 1× upper_bound on trunk cumsums                       (full trunks)  O(log √D)
 //   • 1× alias sample inside trunk                          O(1), branchless
@@ -24,7 +24,7 @@
 //
 // Algorithm 2 reproduced precisely:
 //   given (u, t_prev):
-//     Γ_len = candidate_set_len(u, t_prev)   // count of t < t_prev
+//     Γ_len = candidate_set_len(u, t_prev)   // count of t > t_prev
 //     if Γ_len == 0 → walk dies
 //     T = pat.trunk_size_of(u); num_full = Γ_len / T; partial = Γ_len % T
 //     full_total   = (num_full > 0) ? trunk_cs[num_full - 1] : 0
@@ -77,7 +77,7 @@ inline SampledStep sample_pat(const TemporalGraph& graph,
                               int64_t              t_prev,
                               Pcg64&               rng,
                               SamplerScratch&      scratch) noexcept {
-    // --- 1. Candidate-set length (binary search in time-asc timestamps).
+    // --- 1. Candidate-set length (binary search in time-desc timestamps).
     const auto ts_u   = graph.timestamps_of(u);
     const int64_t G   = graph.candidate_set_len(u, t_prev);
     if (G == 0) return SampledStep{kWalkDeadSentinel, 0};
@@ -130,7 +130,7 @@ inline SampledStep sample_pat(const TemporalGraph& graph,
     // --- 4. ITS over (full_trunks ∪ partial_trunk) to pick where.
     const double r = rng.next_u01() * total;
 
-    int64_t chosen_edge_pos;  // position in u's time-desc edge list
+    int64_t chosen_edge_pos;  // position in u's time-desc edge list (newest first)
 
     if (r < full_total) {
         // Pick a full trunk via ITS.

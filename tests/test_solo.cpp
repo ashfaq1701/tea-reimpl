@@ -35,29 +35,29 @@
 
 namespace {
 
-// One vertex (v=0) with D inbound edges, time-ASC timestamps in
-// [t0, t0+D-1].  Storage is asc; position p holds source 100+(D-1-p) with
-// ts t0+p.
+// One vertex (u=0) with D outbound edges, with timestamps in [t0, t0+D-1].
+// Storage is desc; position p holds destination 100+(D-1-p) with ts t0+(D-1-p),
+// so position 0 = newest (ts t0+D-1).
 tea::TemporalGraph make_one_vertex_graph(int32_t D, int64_t t0 = 1000) {
     std::vector<tea::Edge> edges;
     for (int32_t j = 0; j < D; ++j) {
-        edges.push_back({100 + j, 0, t0 + j});
+        edges.push_back({0, 100 + j, t0 + j});
     }
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/200, /*is_directed=*/true);
     return g;
 }
 
-// Mixed inbound-degree graph: v=0 solo (D=10), v=1 hierarchical (D=200),
-// v=2 boundary (D=kThr+1), v=3 below boundary (D=kThr), v=4 zero-degree.
+// Mixed outbound-degree graph: u=0 solo (D=10), u=1 hierarchical (D=200),
+// u=2 boundary (D=kThr+1), u=3 below boundary (D=kThr), u=4 zero-degree.
 tea::TemporalGraph make_mixed_solo_hier_graph() {
     std::vector<tea::Edge> edges;
     constexpr int Thr = tea::kHpatDegreeThreshold;
     const int degrees[] = {10, 200, Thr + 1, Thr, 0};
-    for (int v = 0; v < 5; ++v) {
-        for (int j = 0; j < degrees[v]; ++j) {
-            // 1000+j → v: v gets one inbound edge from source 1000+j.
-            edges.push_back({1000 + j, v, 50000 + j});
+    for (int u = 0; u < 5; ++u) {
+        for (int j = 0; j < degrees[u]; ++j) {
+            // u → 1000+j: u gets one outbound edge to destination 1000+j.
+            edges.push_back({u, 1000 + j, 50000 + j});
         }
     }
     tea::TemporalGraph g;
@@ -152,12 +152,12 @@ TEST(Solo, FullPrefixDistributionMatchesAnalyticLinear) {
     hpat.build(g, bias);
     ASSERT_TRUE(hpat.is_solo(0));
 
-    // Expected analytic distribution: edge at position i (in time-ASC list)
-    // has rank i + 1, so P(i) = (i + 1) / (D·(D+1)/2).
+    // Expected analytic distribution: edge at position i (in time-DESC list)
+    // has rank D - i, so P(i) = (D - i) / (D·(D+1)/2).
     std::vector<double> expected_p(D);
     const double total = static_cast<double>(D) * (D + 1) / 2.0;
     for (int32_t i = 0; i < D; ++i) {
-        expected_p[i] = static_cast<double>(i + 1) / total;
+        expected_p[i] = static_cast<double>(D - i) / total;
     }
 
     // Sample 200K times with t_prev = -∞ so candidate set = full D.
@@ -192,20 +192,20 @@ TEST(Solo, PartialPrefixDistributionMatchesAnalyticLinear) {
     hpat.build(g, bias);
     ASSERT_TRUE(hpat.is_solo(0));
 
-    // Pick t_prev to cut the backward candidate set down to L=12.
-    // Storage is ASCENDING: ts at positions 0..19 are 1000..1019.  For
-    // L=12 we need 12 entries with t < t_prev: t_prev = 1012 (entries
-    // 1000..1011, i.e. positions 0..11).
+    // Pick t_prev to cut the forward candidate set down to L=12.
+    // Storage is DESCENDING: ts at positions 0..19 are 1019..1000.  For
+    // L=12 we need 12 entries with t > t_prev: t_prev = 1007 (entries
+    // 1019..1008 are > 1007, i.e. positions 0..11).
     constexpr int64_t L = 12;
-    const int64_t t_prev = 1012;
+    const int64_t t_prev = 1007;
     ASSERT_EQ(g.candidate_set_len(0, t_prev), L);
 
-    // Expected: under LinearBias, weights for the time-ASC prefix [0, L)
-    // are rank = position + 1 = 1, 2, ..., 12.
+    // Expected: under LinearBias, weights for the time-DESC prefix [0, L)
+    // are rank = D - position = 20, 19, ..., 9.
     std::vector<double> weights(L);
     double sum = 0.0;
     for (int64_t i = 0; i < L; ++i) {
-        weights[i] = static_cast<double>(i + 1);
+        weights[i] = static_cast<double>(D - i);
         sum += weights[i];
     }
     std::vector<double> expected_p(L);

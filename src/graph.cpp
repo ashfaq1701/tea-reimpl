@@ -1,15 +1,14 @@
-// TemporalGraph::build implementation — inbound-CSR build for backward
+// TemporalGraph::build implementation — outbound-CSR build for forward
 // temporal walks.
 //
 // For directed graphs: each (u, v, t) input edge produces one stored entry
-// under vertex v's adjacency, with target=u (the source) and ts=t.  A
-// backward walker at v with t_prev < t can pick this entry to step to u.
+// under vertex u's adjacency, with target=v (the destination) and ts=t.  A
+// forward walker at u with t_prev < t can pick this entry to step to v.
 //
 // For undirected graphs: each (u, v, t) adds entries to BOTH u's and v's
 // adjacencies, each with the OTHER vertex as the stored target.
 //
-// Performance notes (post-Phase-1 review, preserved across the
-// outbound→inbound refactor):
+// Performance notes:
 //   - Degree count is parallelized via OpenMP `atomic update` rather than
 //     thread-local histograms because the histogram-then-reduce pattern
 //     costs O(T·N) memory which is wasteful for our N≈1M, T≈16 case
@@ -79,7 +78,7 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
     }
 
     // 2. Parallel degree count via atomic update.
-    //    Directed:   each (u, v, t) contributes to v's slot count.
+    //    Directed:   each (u, v, t) contributes to u's slot count.
     //    Undirected: each contributes to both u's and v's slot counts.
     std::vector<int64_t> degree(n, 0);
     const auto E = edges.size();
@@ -88,7 +87,7 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
         const Edge& e = edges[i];
         if (is_directed) {
             #pragma omp atomic update
-            ++degree[e.v];
+            ++degree[e.u];
         } else {
             #pragma omp atomic update
             ++degree[e.u];
@@ -113,36 +112,36 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
     timestamps_.assign(total, 0);
 
     // 5. Parallel scatter via atomic capture on per-vertex cursor.
-    //    Directed:   (u, v, t) → at v's slot: target=u, ts=t.
-    //    Undirected: also at u's slot: target=v, ts=t.
+    //    Directed:   (u, v, t) → at u's slot: target=v, ts=t.
+    //    Undirected: also at v's slot: target=u, ts=t.
     std::vector<int64_t> cursor(n, 0);
     #pragma omp parallel for schedule(static, 4096)
     for (std::size_t i = 0; i < E; ++i) {
         const Edge& e = edges[i];
-        // Always store the inbound side for v (directed) or one of the
+        // Always store the outbound side for u (directed) or one of the
         // two sides for undirected.
-        int64_t slot_v;
+        int64_t slot_u;
         #pragma omp atomic capture
-        slot_v = cursor[e.v]++;
-        const int64_t pos_v = offsets_[e.v] + slot_v;
-        targets_[pos_v]    = e.u;
-        timestamps_[pos_v] = e.t;
+        slot_u = cursor[e.u]++;
+        const int64_t pos_u = offsets_[e.u] + slot_u;
+        targets_[pos_u]    = e.v;
+        timestamps_[pos_u] = e.t;
         if (!is_directed) {
-            int64_t slot_u;
+            int64_t slot_v;
             #pragma omp atomic capture
-            slot_u = cursor[e.u]++;
-            const int64_t pos_u = offsets_[e.u] + slot_u;
-            targets_[pos_u]    = e.v;
-            timestamps_[pos_u] = e.t;
+            slot_v = cursor[e.v]++;
+            const int64_t pos_v = offsets_[e.v] + slot_v;
+            targets_[pos_v]    = e.u;
+            timestamps_[pos_v] = e.t;
         }
     }
 
-    // 6. Per-vertex time-ASCENDING sort via zip-and-sort.
+    // 6. Per-vertex time-DESCENDING sort via zip-and-sort.
     //    Thread-local scratch reused across vertices (no per-vertex alloc).
-    //    Ascending order makes the backward-walk candidate set
-    //    Γ_{t_prev}(v) = {t < t_prev} a contiguous PREFIX [0, L) of the
+    //    Descending order makes the forward-walk candidate set
+    //    Γ_{t_prev}(u) = {t > t_prev} a contiguous PREFIX [0, L) of the
     //    adjacency list, which matches PAT/HPAT's prefix-based trunk
-    //    decomposition.
+    //    decomposition and the paper's Figure 5 layout.
     #pragma omp parallel
     {
         std::vector<TsTgtPair> zip;
@@ -162,7 +161,7 @@ void TemporalGraph::build(std::vector<Edge>&& edges,
 
             std::sort(zip.data(), zip.data() + d,
                 [](const TsTgtPair& a, const TsTgtPair& b) {
-                    return a.ts < b.ts;  // ASCENDING
+                    return a.ts > b.ts;  // DESCENDING
                 });
 
             for (int64_t i = 0; i < d; ++i) {

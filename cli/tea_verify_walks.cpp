@@ -1,14 +1,14 @@
-// tea_verify_walks: end-to-end correctness verifier for backward walks.
+// tea_verify_walks: end-to-end correctness verifier for forward walks.
 //
 // Loads a CSV, builds the graph and HPAT, runs walks via the same path
 // as tea_walk, then iterates over EVERY emitted walk and asserts:
 //
 //   1. Slot 0 = (start_vertex, kSentinelStartTimestamp).
-//   2. For k ≥ 1: walk[k].t < walk[k-1].t (strict causal decrease, with
+//   2. For k ≥ 1: walk[k].t > walk[k-1].t (strict causal increase, with
 //      sentinel handling for k=1).
 //   3. For k ≥ 1: there exists an entry in graph.targets_of(walk[k-1].v)
 //      with target = walk[k].v and ts = walk[k].t (the transition is a
-//      real edge in the inbound CSR of walk[k-1].v).
+//      real edge in the outbound CSR of walk[k-1].v).
 //   4. Trailing slots after walk_len are sentinel-padded.
 //
 // On any failure: prints the offending walk + step and exits 2.
@@ -46,9 +46,9 @@ struct VerifyStats {
     int64_t max_walk_len_seen = 0;
 };
 
-// Returns true if (target, ts) appears in u's inbound adjacency.
+// Returns true if (target, ts) appears in u's outbound adjacency.
 // O(D_u) linear scan — fine for verification.
-bool edge_in_inbound(const tea::TemporalGraph& g,
+bool edge_in_outbound(const tea::TemporalGraph& g,
                      int32_t u, int32_t target_v, int64_t ts) {
     const auto tgt = g.targets_of(u);
     const auto t   = g.timestamps_of(u);
@@ -70,12 +70,12 @@ void die_on_step(int64_t walk_idx, int32_t step, const char* reason,
     }
     if (step >= 1) {
         const int32_t prev_v = slots[step - 1].v;
-        std::fprintf(stderr, "Inbound adjacency of v=%d (the prev step's vertex):\n",
+        std::fprintf(stderr, "Outbound adjacency of v=%d (the prev step's vertex):\n",
                      prev_v);
         const auto tgt = g.targets_of(prev_v);
         const auto t   = g.timestamps_of(prev_v);
         for (std::size_t i = 0; i < tgt.size(); ++i) {
-            std::fprintf(stderr, "  src=%d  ts=%ld\n",
+            std::fprintf(stderr, "  dst=%d  ts=%ld\n",
                          tgt[i], static_cast<long>(t[i]));
         }
     }
@@ -99,8 +99,8 @@ void verify_walk(const tea::TemporalGraph& g,
     }
     if (walk_len == 1) ++stats.dead_at_start;
 
-    // 2-3. Each subsequent slot must be a real inbound edge of the prev
-    //      slot with strictly smaller timestamp.
+    // 2-3. Each subsequent slot must be a real outbound edge of the prev
+    //      slot with strictly larger timestamp.
     int64_t prev_ts = tea::kSentinelStartTimestamp;
     int32_t prev_v  = slots[0].v;
     for (int32_t k = 1; k < walk_len; ++k) {
@@ -112,16 +112,16 @@ void verify_walk(const tea::TemporalGraph& g,
                         "live slot but vertex is kWalkDeadSentinel",
                         g, slots, walk_len);
         }
-        // Strictly decreasing in time.  k=1 is t_1 < kSentinelStartTimestamp
-        // (INT64_MAX), trivially satisfied for any real ts.
-        if (!(t_k < prev_ts)) {
-            die_on_step(walk_idx, k, "timestamp not strictly less than prev",
+        // Strictly increasing in time.  k=1 is t_1 > kSentinelStartTimestamp
+        // (INT64_MIN), trivially satisfied for any real ts.
+        if (!(t_k > prev_ts)) {
+            die_on_step(walk_idx, k, "timestamp not strictly greater than prev",
                         g, slots, walk_len);
         }
-        // Edge must exist in the inbound CSR of prev_v.
-        if (!edge_in_inbound(g, prev_v, v_k, t_k)) {
+        // Edge must exist in the outbound CSR of prev_v.
+        if (!edge_in_outbound(g, prev_v, v_k, t_k)) {
             die_on_step(walk_idx, k,
-                        "edge (prev_v ← v_k @ t_k) not in graph",
+                        "edge (prev_v → v_k @ t_k) not in graph",
                         g, slots, walk_len);
         }
 

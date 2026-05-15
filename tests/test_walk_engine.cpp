@@ -1,8 +1,8 @@
 // Phase 6.1: WalkEngine — parallel-walk orchestration correctness.
 //
-// Walks are BACKWARD-IN-TIME: each step picks a t_k strictly less than
+// Walks are FORWARD-IN-TIME: each step picks a t_k strictly greater than
 // t_{k-1}.  Slot 0 holds the start vertex with t = kSentinelStartTimestamp
-// (= INT64_MAX) so the first hop has the full candidate set.
+// (= INT64_MIN) so the first hop has the full candidate set.
 //
 // What we verify:
 //   • WalkRunStats fields (num_walks, total_steps, dead_at_start) match
@@ -10,7 +10,7 @@
 //   • All emitted walks are temporally valid:
 //       - Slot 0 = (start_vertex, kSentinelStartTimestamp).
 //       - For step k > 0: (v_k, t_k) is a real out-edge of v_{k-1}
-//         with t_k < t_{k-1} (or t_{k-1} == sentinel for k=1).
+//         with t_k > t_{k-1} (or t_{k-1} == sentinel for k=1).
 //   • Walks that die early are sentinel-padded (v == kWalkDeadSentinel).
 //   • Determinism: same global_seed → byte-identical walks_out, even
 //     across different OpenMP thread counts. (Per-walk RNG seeded from
@@ -66,7 +66,7 @@ tea::TemporalGraph make_fanout_graph() {
     return g;
 }
 
-// Verify (v, t) is a valid out-edge of u with t < t_prev (backward walks).
+// Verify (v, t) is a valid out-edge of u with t > t_prev (forward walks).
 // Returns matching edge index or -1 if no match.  Slow O(degree) — fine for
 // tests.
 int32_t find_edge(const tea::TemporalGraph& g, int32_t u, int32_t v,
@@ -74,7 +74,7 @@ int32_t find_edge(const tea::TemporalGraph& g, int32_t u, int32_t v,
     const auto tgt = g.targets_of(u);
     const auto ts  = g.timestamps_of(u);
     for (std::size_t i = 0; i < tgt.size(); ++i) {
-        if (tgt[i] == v && ts[i] == t && ts[i] < t_prev) {
+        if (tgt[i] == v && ts[i] == t && ts[i] > t_prev) {
             return static_cast<int32_t>(i);
         }
     }
@@ -467,14 +467,14 @@ TEST(WalkEngine, EmptyStartsZeroStats) {
 //
 // Port of Tempest's `WalkTerminalEdgesTest`
 // (temporal-random-walk/temporal_random_walk/test/test_temporal_random_walk.cpp
-//  :295-366), adapted for tea-reimpl's backward-walks-on-inbound-CSR
+//  :295-366), adapted for tea-reimpl's forward-walks-on-outbound-CSR
 // semantics.
 //
 // Invariant: every walk with `walk_len < max_walk_len` did so because
-// Γ_{t_prev_last}(u_last) was empty — i.e., the inbound edge list of the
-// last visited vertex contains no entry with timestamp strictly less than
-// the walk's current t_prev.  If any such entry existed, the walker should
-// have taken it; an early break in the walk loop is a regression.
+// Γ_{t_prev_last}(u_last) was empty — i.e., the outbound edge list of the
+// last visited vertex contains no entry with timestamp strictly greater
+// than the walk's current t_prev.  If any such entry existed, the walker
+// should have taken it; an early break in the walk loop is a regression.
 //
 // Why exercise this with LinearBias specifically:
 //   The walk-loop break condition is `sample(...) == kWalkDeadSentinel`,
@@ -484,7 +484,7 @@ TEST(WalkEngine, EmptyStartsZeroStats) {
 //     (b) sum of bias weights over the candidate set is zero — a
 //         degenerate edge case that can only fire under ExponentialBias
 //         when every weight underflows (large unix span + timescale=-1).
-//   LinearBias weights are `position + 1 ∈ [1, D]`, never zero, never
+//   LinearBias weights are `D - position ∈ [1, D]`, never zero, never
 //   underflowing, so case (b) is unreachable here.  Any termination is
 //   therefore guaranteed to be case (a).
 // -----------------------------------------------------------------------------
@@ -497,8 +497,8 @@ TEST(WalkEngine, EarlyTerminationOnlyWhenCandidateSetEmpty) {
     hpat.build(g, bias);
 
     // Use mwl considerably larger than the natural walk depth on this
-    // fixture (per-vertex inbound timestamps span a 30-unit slice; each
-    // backward hop cuts the candidate set, so walks die well before 80
+    // fixture (per-vertex outbound timestamps span a 30-unit slice; each
+    // forward hop cuts the candidate set, so walks die well before 80
     // hops).  Including vertex 30 (degree 0) in the start set exercises
     // the walk_len==1 edge of the invariant.
     constexpr int32_t N = 1000;
@@ -525,7 +525,7 @@ TEST(WalkEngine, EarlyTerminationOnlyWhenCandidateSetEmpty) {
 
         // Last entry in the walk.  For walk_len == 1, this is slot 0 —
         // the start vertex at the sentinel timestamp; candidate_set_len
-        // there is u_start's full inbound degree, so the invariant reduces
+        // there is u_start's full outbound degree, so the invariant reduces
         // to "dead-at-start only when degree == 0".
         const tea::NodeStep last =
             out[static_cast<int64_t>(i) * L + (walk_len - 1)];
@@ -537,7 +537,7 @@ TEST(WalkEngine, EarlyTerminationOnlyWhenCandidateSetEmpty) {
             << "walk " << i << " terminated at step " << (walk_len - 1)
             << " (vertex=" << u_last << ", t_prev=" << t_prev
             << ", walk_len=" << walk_len << ") with " << G
-            << " admissible inbound edge(s) still satisfying t < t_prev. "
+            << " admissible outbound edge(s) still satisfying t > t_prev. "
                "Under LinearBias every non-empty candidate set has "
                "non-zero total weight, so this is a regression in the "
                "walk-loop termination logic.";
@@ -547,7 +547,7 @@ TEST(WalkEngine, EarlyTerminationOnlyWhenCandidateSetEmpty) {
     }
 
     // Cover both branches of the invariant: walks that died at the start
-    // (degree == 0) AND walks that took ≥ 1 hop and then ran out of past
+    // (degree == 0) AND walks that took ≥ 1 hop and then ran out of future
     // edges.  Without both we'd be silently testing only one half.
     EXPECT_GT(dead_at_start, 0)
         << "Fixture didn't include any dead-at-start vertices; the "

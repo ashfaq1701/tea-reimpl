@@ -27,19 +27,18 @@
 namespace {
 
 tea::TemporalGraph build_test_graph() {
-    // 5 "main" vertices with varying inbound-degree (the backward-walks
-    // adjacency).  Flip src/dst from the original fan-out layout so
-    // vertices 0..4 receive the inbound edges:
-    //   v=0:  10 inbound  (medium)
-    //   v=1: 100 inbound  (high; multiple trunks)
-    //   v=2:   1 inbound  (low; one trunk, padded by min_trunk_size)
-    //   v=3:   0 inbound
-    //   v=4:   4 inbound  (just below min_trunk_size)
+    // 5 "main" vertices with varying outbound-degree (the forward-walks
+    // adjacency):
+    //   u=0:  10 outbound (medium)
+    //   u=1: 100 outbound (high; multiple trunks)
+    //   u=2:   1 outbound (low; one trunk, padded by min_trunk_size)
+    //   u=3:   0 outbound
+    //   u=4:   4 outbound (just below min_trunk_size)
     std::vector<tea::Edge> edges;
-    for (int i = 0; i < 10;  ++i) edges.push_back({100 + i, 0, 1000 + i});
-    for (int i = 0; i < 100; ++i) edges.push_back({200 + i, 1, 2000 + i});
-    edges.push_back({300, 2, 3000});
-    for (int i = 0; i < 4; ++i) edges.push_back({400 + i, 4, 4000 + i});
+    for (int i = 0; i < 10;  ++i) edges.push_back({0, 100 + i, 1000 + i});
+    for (int i = 0; i < 100; ++i) edges.push_back({1, 200 + i, 2000 + i});
+    edges.push_back({2, 300, 3000});
+    for (int i = 0; i < 4; ++i) edges.push_back({4, 400 + i, 4000 + i});
 
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/500, /*is_directed=*/true);
@@ -118,12 +117,12 @@ TEST(PatBuild, BiasParamsAreStored) {
     tea::Pat<tea::ExponentialBias> pat;
     pat.build(g, bias);
 
-    // v=0 has 10 edges with ts in 1000..1009. After time-asc sort: t_max=1009.
+    // u=0 has 10 outbound edges with ts in 1000..1009. After time-desc sort: t_max=1009.
     const auto& p0 = pat.bias_params_of(0);
     EXPECT_DOUBLE_EQ(p0.t_pivot, 1009.0);
     EXPECT_DOUBLE_EQ(p0.scale, 1.0);
 
-    // v=1 has 100 edges with ts in 2000..2099. t_max=2099.
+    // u=1 has 100 outbound edges with ts in 2000..2099. t_max=2099.
     const auto& p1 = pat.bias_params_of(1);
     EXPECT_DOUBLE_EQ(p1.t_pivot, 2099.0);
     EXPECT_DOUBLE_EQ(p1.scale, 1.0);
@@ -160,16 +159,16 @@ TEST(PatBuild, AliasTablesPerTrunkAreNonEmpty) {
     tea::Pat<tea::UniformBias> pat;
     pat.build(g, tea::UniformBias{});
 
-    // For v=1 (D=100, T=10), there should be 10 trunks each with 10 entries.
+    // For u=1 (D=100, T=10), there should be 10 trunks each with 10 entries.
     EXPECT_EQ(pat.num_trunks_of(1), 10);
     for (int i = 0; i < 10; ++i) {
         auto av = pat.alias_view_of_trunk(g, 1, i);
         EXPECT_EQ(av.size(), 10u);
     }
-    // For v=2 (D=1, T=1), one trunk of 1 entry.
+    // For u=2 (D=1, T=1), one trunk of 1 entry.
     EXPECT_EQ(pat.num_trunks_of(2), 1);
     EXPECT_EQ(pat.alias_view_of_trunk(g, 2, 0).size(), 1u);
-    // For v=4 (D=4, T=4), one trunk of 4 entries.
+    // For u=4 (D=4, T=4), one trunk of 4 entries.
     EXPECT_EQ(pat.num_trunks_of(4), 1);
     EXPECT_EQ(pat.alias_view_of_trunk(g, 4, 0).size(), 4u);
 }
@@ -205,19 +204,19 @@ TEST(PatBuild, ParallelBuildIsDeterministic) {
 }
 
 TEST(PatBuild, ExpBiasTrunkTotalsReflectTimeOrdering) {
-    // Under time-ASC storage, the LAST trunk (newest edges) should have
+    // Under time-DESC storage, the FIRST trunk (newest edges) should have
     // the largest weight under ExpBias — exp(t_max − t_max) = 1 lives at
-    // the end, exp((older t) − t_max) ≪ 1 lives at the start.
+    // position 0, exp((older t) − t_max) ≪ 1 lives toward the end.
     auto g = build_test_graph();
     tea::Pat<tea::ExponentialBias> pat;
     pat.build(g, tea::ExponentialBias{});
 
-    auto cs = pat.trunk_cumsums_of(1);  // v=1, 10 trunks of 10 edges each
+    auto cs = pat.trunk_cumsums_of(1);  // u=1, 10 trunks of 10 edges each
     ASSERT_GE(cs.size(), 2u);
     // Trunk 0 total = cs[0]; last trunk total = cs[K-1] - cs[K-2].
     const std::size_t K = cs.size();
     const double t_first = cs[0];
     const double t_last  = cs[K - 1] - cs[K - 2];
-    EXPECT_GT(t_last, t_first)
-        << "newest trunk (asc-list end) should have higher total weight than the oldest";
+    EXPECT_GT(t_first, t_last)
+        << "newest trunk (desc-list start) should have higher total weight than the oldest";
 }

@@ -1,8 +1,8 @@
 // Phase 3.3: PAT sampler distribution correctness.
 //
-// Walks are BACKWARD-IN-TIME; per-vertex edges are sorted ASC.  The
-// candidate set Γ_{t_prev}(u) = {t < t_prev} is the PREFIX [0, L) of u's
-// asc edge list.  All t_prev values in this file are chosen with that
+// Walks are FORWARD-IN-TIME; per-vertex edges are sorted DESC.  The
+// candidate set Γ_{t_prev}(u) = {t > t_prev} is the PREFIX [0, L) of u's
+// desc edge list.  All t_prev values in this file are chosen with that
 // convention in mind.
 //
 // The strongest test we can write at this stage. For each bias we:
@@ -20,7 +20,7 @@
 // distribution tests are the ONLY way to find them.
 //
 // We also verify:
-//   • Walk-dies when Γ_t(u) is empty (t_prev ≤ smallest edge).
+//   • Walk-dies when Γ_t(u) is empty (t_prev ≥ newest edge).
 //   • Partial-trunk case is exercised (degree > trunk_size, t_prev in middle).
 //   • Full-trunk-only case (Γ_len % trunk_size == 0).
 //   • Single-edge case (degree=1, T=1, always returns that one edge).
@@ -43,16 +43,23 @@
 
 namespace {
 
-// Build a small directed graph with one TARGET vertex u=0 receiving K
-// inbound edges with distinct timestamps from sources 100..99+K.  We
-// populate edges so that after time-ASC sort of v=0's inbound list,
-// position p holds ts (p+1)*ts_step and source 99+K-p.  All timestamps
-// fit within the backward candidate set when t_prev > the newest ts.
+// Build a small directed graph with one SOURCE vertex u=0 emitting K
+// outbound edges with distinct timestamps to destinations 100..99+K.  We
+// populate edges so that after time-DESC sort of u=0's outbound list,
+// position p holds ts (K-p)*ts_step and destination 100+p (since the
+// edge with the largest ts is added first → position 0).
+//
+// Wait — actually after time-desc sort:
+//   The input edge i has destination 100+i and ts (K-i)*ts_step.
+//   ts decreases as i increases: edge 0 has largest ts K*ts_step,
+//   edge K-1 has smallest ts ts_step.
+//   After DESC sort: position p holds edge with rank p (largest first).
+//   So position p has ts (K-p)*ts_step and destination 100+p.
 tea::TemporalGraph build_star(int K, int64_t ts_step = 100) {
     std::vector<tea::Edge> edges;
     edges.reserve(K);
     for (int i = 0; i < K; ++i) {
-        edges.push_back({100 + i, 0, static_cast<int64_t>((K - i) * ts_step)});
+        edges.push_back({0, 100 + i, static_cast<int64_t>((K - i) * ts_step)});
     }
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/200, /*is_directed=*/true);
@@ -60,7 +67,7 @@ tea::TemporalGraph build_star(int K, int64_t ts_step = 100) {
 }
 
 // Compute analytic P(e_i) for the bias on this exact slice of u's edges.
-// `partial_start` / `partial_len` slice into u's asc edge list; the backward
+// `partial_start` / `partial_len` slice into u's desc edge list; the forward
 // candidate set corresponds to partial_start=0, partial_len=L.
 template <typename BiasT>
 std::vector<double> analytic_probs(const tea::TemporalGraph& g,
@@ -180,18 +187,19 @@ TEST(SamplerPat, UniformDistribution_MultipleTrunksAllFull) {
 }
 
 TEST(SamplerPat, UniformDistribution_WithPartialTrunk) {
-    // K = 16 edges, T_u = 8. Set t_prev to expose exactly 12 edges
+    // K = 16 edges, T_u = 8.  Set t_prev to expose exactly 12 edges
     //   → Γ_len = 12, num_full = 1, partial_size = 4 (PARTIAL TRUNK)
     auto g = build_star(16, /*ts_step=*/100);
-    // ts_asc = [100, 200, ..., 1600]; want Γ_len = 12 ⇒ t_prev > ts[11] = 1200
-    //   and t_prev ≤ ts[12] = 1300. Pick t_prev = 1250.
+    // ts_desc = [1600, 1500, ..., 100]; want Γ_len = 12 (count of t > t_prev).
+    // The 12 largest are positions 0..11 with values 1600..500.  Pick
+    // t_prev = 450 (count of t > 450 = 12).
     tea::Pat<tea::UniformBias> pat;
     tea::UniformBias bias;
     pat.build(g, bias);
-    ASSERT_EQ(g.candidate_set_len(0, 1250), 12);
+    ASSERT_EQ(g.candidate_set_len(0, 450), 12);
 
     auto p = analytic_probs(g, bias, 0, /*partial_start=*/0, /*partial_len=*/12);
-    distribution_check(g, pat, bias, 0, /*t_prev=*/1250, 200000, 0xb22, p, 0);
+    distribution_check(g, pat, bias, 0, /*t_prev=*/450, 200000, 0xb22, p, 0);
 }
 
 // ============================================================================
@@ -208,18 +216,18 @@ TEST(SamplerPat, LinearDistribution_FullTrunkOnly) {
 }
 
 TEST(SamplerPat, LinearDistribution_WithPartialTrunk) {
-    // K = 16, T = 8, t_prev = 1250 → Γ_len = 12, partial trunk of size 4.
+    // K = 16, T = 8, t_prev = 450 → Γ_len = 12, partial trunk of size 4.
     auto g = build_star(16);
     tea::Pat<tea::LinearBias> pat;
     tea::LinearBias bias;
     pat.build(g, bias);
-    ASSERT_EQ(g.candidate_set_len(0, 1250), 12);
+    ASSERT_EQ(g.candidate_set_len(0, 450), 12);
 
     // Partial trunk's weights at sample time MUST match what was used at
     // build for positions [0, 12) — verifies the per-vertex bias-params +
     // slice-start-pos contract.
     auto p = analytic_probs(g, bias, 0, 0, 12);
-    distribution_check(g, pat, bias, 0, 1250, 200000, 0x456, p, 0);
+    distribution_check(g, pat, bias, 0, 450, 200000, 0x456, p, 0);
 }
 
 // ============================================================================
@@ -227,17 +235,18 @@ TEST(SamplerPat, LinearDistribution_WithPartialTrunk) {
 // ============================================================================
 TEST(SamplerPat, ExponentialDistribution_SmallTimeScale) {
     // Use small timestamps so exp() doesn't underflow.  K=4 → no partial trunk.
-    // ts step = 1: weights at asc positions 0..3 = exp(-3), exp(-2), exp(-1), exp(0).
+    // ts step = 1: ts_desc = [4, 3, 2, 1] → t_max = 4.
+    // Weights at positions 0..3 = exp(0), exp(-1), exp(-2), exp(-3).
     auto g = build_star(4, /*ts_step=*/1);
     tea::Pat<tea::ExponentialBias> pat;
     tea::ExponentialBias bias;
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    // Sanity: newest edge (last position in asc) gets the largest probability.
-    EXPECT_GT(p[3], p[2]);
-    EXPECT_GT(p[2], p[1]);
-    EXPECT_GT(p[1], p[0]);
+    // Sanity: newest edge (first position in desc) gets the largest probability.
+    EXPECT_GT(p[0], p[1]);
+    EXPECT_GT(p[1], p[2]);
+    EXPECT_GT(p[2], p[3]);
     distribution_check(g, pat, bias, 0, kAllEligible, 300000, 0x789, p, 0);
 }
 
@@ -247,11 +256,11 @@ TEST(SamplerPat, ExponentialDistribution_WithPartialTrunk) {
     tea::ExponentialBias bias;
     pat.build(g, bias);
 
-    // ts_asc = [1, 2, ..., 16].  Γ_len = 12 ⇒ t_prev > 12 and t_prev ≤ 13.
-    // Pick t_prev = 13.
-    ASSERT_EQ(g.candidate_set_len(0, 13), 12);
+    // ts_desc = [16, 15, ..., 1].  Γ_len = 12 ⇒ count of t > t_prev = 12.
+    // The 12 largest are 16..5.  Pick t_prev = 4 (count > 4 = 12).
+    ASSERT_EQ(g.candidate_set_len(0, 4), 12);
     auto p = analytic_probs(g, bias, 0, 0, 12);
-    distribution_check(g, pat, bias, 0, /*t_prev=*/13, 300000, 0xabc, p, 0);
+    distribution_check(g, pat, bias, 0, /*t_prev=*/4, 300000, 0xabc, p, 0);
 }
 
 TEST(SamplerPat, ExponentialDistribution_TimescaleBoundCompresses) {
@@ -271,24 +280,24 @@ TEST(SamplerPat, ExponentialDistribution_TimescaleBoundCompresses) {
 // Sampler edge cases
 // ============================================================================
 TEST(SamplerPat, WalkDiesWhenCandidateSetEmpty) {
-    auto g = build_star(4, 100);  // ts_asc = [100, 200, 300, 400]
+    auto g = build_star(4, 100);  // ts_desc = [400, 300, 200, 100]
     tea::Pat<tea::UniformBias> pat;
     pat.build(g, tea::UniformBias{});
     tea::Pcg64 rng(0xfeed, 0);
     tea::SamplerScratch scratch;
 
-    // Backward: t_prev ≤ oldest ts → no candidates → walk dies.
+    // Forward: t_prev ≥ newest ts → no candidates → walk dies.
     auto step = tea::sample_pat(g, pat, tea::UniformBias{}, /*u=*/0,
-                                /*t_prev=*/50, rng, scratch);
+                                /*t_prev=*/500, rng, scratch);
     EXPECT_EQ(step.v, tea::kWalkDeadSentinel);
 
-    step = tea::sample_pat(g, pat, tea::UniformBias{}, 0, 100, rng, scratch);
-    EXPECT_EQ(step.v, tea::kWalkDeadSentinel);  // ≤ oldest still dies (strict <)
+    step = tea::sample_pat(g, pat, tea::UniformBias{}, 0, 400, rng, scratch);
+    EXPECT_EQ(step.v, tea::kWalkDeadSentinel);  // ≥ newest still dies (strict >)
 }
 
 TEST(SamplerPat, SingleEdgeAlwaysReturnsIt) {
-    // u=0 has exactly 1 inbound edge from 42 at t=100.
-    std::vector<tea::Edge> edges = {{42, 0, 100}};
+    // u=0 has exactly 1 outbound edge to 42 at t=100.
+    std::vector<tea::Edge> edges = {{0, 42, 100}};
     tea::TemporalGraph g;
     g.build(std::move(edges), 100, true);
     tea::Pat<tea::UniformBias> pat;
@@ -297,7 +306,7 @@ TEST(SamplerPat, SingleEdgeAlwaysReturnsIt) {
     tea::SamplerScratch scratch;
 
     for (int i = 0; i < 1000; ++i) {
-        // Sentinel start → every inbound edge is a backward candidate.
+        // Sentinel start → every outbound edge is a forward candidate.
         auto step = tea::sample_pat(g, pat, tea::UniformBias{}, 0,
                                     kAllEligible, rng, scratch);
         EXPECT_EQ(step.v, 42);
@@ -331,9 +340,9 @@ TEST(SamplerPat, DeterministicWithFixedSeed) {
 
 TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
     // Build a 100-vertex graph with random connectivity, run many samples,
-    // verify every returned target is one of the actual inbound edges of u
-    // at a valid timestamp (t < t_prev for backward walks).  Edges are
-    // generated as (src, dst, t) → stored under dst's adjacency.
+    // verify every returned target is one of the actual outbound edges of u
+    // at a valid timestamp (t > t_prev for forward walks).  Edges are
+    // generated as (src, dst, t) → stored under src's adjacency.
     std::vector<tea::Edge> edges;
     tea::Pcg64 wrng(0xff, 0);
     for (int32_t u = 0; u < 100; ++u) {
@@ -355,12 +364,12 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
     int live_count = 0;
     for (int32_t u = 0; u < 100; ++u) {
         for (int trial = 0; trial < 100; ++trial) {
-            // Random t_prev in [5000, 15000] — backward candidate is
-            // {t < t_prev}; edge ts are in [1, 10000], so most t_prev values
+            // Random t_prev in [-5000, 5000] — forward candidate is
+            // {t > t_prev}; edge ts are in [1, 10000], so most t_prev values
             // admit a non-empty candidate set.  This keeps the live/dead
             // ratio meaningful as a sanity check while still exercising
-            // boundary t_prev values that occasionally fall below all edges.
-            int64_t t_prev = static_cast<int64_t>(5000 + rng.next_below(10000));
+            // boundary t_prev values that occasionally fall above all edges.
+            int64_t t_prev = static_cast<int64_t>(-5000 + static_cast<int64_t>(rng.next_below(10000)));
             auto step = tea::sample_pat(g, pat, tea::ExponentialBias{}, u, t_prev,
                                         rng, scratch);
             if (step.v == tea::kWalkDeadSentinel) {
@@ -368,14 +377,14 @@ TEST(SamplerPat, AcrossManyVerticesAndStartsAllProduceValidTargets) {
                 continue;
             }
             ++live_count;
-            // Verify (step.v, step.t) is a real outgoing edge of u with t < t_prev.
+            // Verify (step.v, step.t) is a real outbound edge of u with t > t_prev.
             auto targets_u = g.targets_of(u);
             auto ts_u      = g.timestamps_of(u);
             bool found = false;
             for (std::size_t i = 0; i < targets_u.size(); ++i) {
                 if (targets_u[i] == step.v && ts_u[i] == step.t) {
                     found = true;
-                    EXPECT_LT(ts_u[i], t_prev) << "sampled edge violates t < t_prev";
+                    EXPECT_GT(ts_u[i], t_prev) << "sampled edge violates t > t_prev";
                     break;
                 }
             }

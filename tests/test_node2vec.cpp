@@ -34,35 +34,32 @@
 namespace {
 
 // Build a small directed graph where the structure is fully known to the test.
-// Under the inbound-CSR storage model (backward walks), each input edge
-// (u, v, t) becomes "v has inbound from u at t".  NeighborSets[w] is the
+// Under the outbound-CSR storage model (forward walks), each input edge
+// (u, v, t) becomes "u has outbound to v at t".  NeighborSets[w] is the
 // UNDIRECTED neighborhood of w (in-neighbors ∪ out-neighbors); on this
-// graph the directed shape happens to put the only "extra" out-neighbor
-// behavior at vertices 2..5 (which point to 0 and 2 without receiving
-// inbound from them).
+// graph the directed shape happens to put the only "extra" in-neighbor
+// behavior at vertices 3, 4, 5 (which are pointed at by 0 and 2 without
+// emitting outbound to them).
 //
 // Target topology for the rejection-sampling test (vertex 0's candidates):
-//   • v=0 has inbound from {1, 2, 3, 4, 5} at ts {100, 200, 300, 400, 500}
-//     — these are the five β candidates when sampling from v=0.
-//   • NeighborSets[1] = {0, 2}     (1↔0 via {1,0,100}+{0,1,50}; 1←2 via {2,1,60})
-//   • NeighborSets[2] = {0, 1, 3, 4}   (2↔0, 2→1, 2←3, 2←4)
+//   • u=0 emits outbound to {1, 2, 3, 4, 5} at ts {500, 400, 300, 200, 100}
+//     — these are the five β candidates when sampling from u=0.  Under
+//     DESC sort, targets_of(0) = [1, 2, 3, 4, 5] and ts = [500..100].
+//   • NeighborSets[1] = {0, 2}       (0→1, 1→0, 1→2 ⇒ 1 neighbors {0, 2})
+//   • NeighborSets[2] = {0, 1, 3, 4} (0→2, 1→2, 2→0, 2→3, 2→4)
 //
-// Walks from v=0 with prev_u=1 see candidates {1, 2, 3, 4, 5}:
-//   - source 1 → returning (β = 1/p)
-//   - source 2 → in NeighborSets[1] (β = 1)
-//   - sources 3, 4, 5 → not in NeighborSets[1] (β = 1/q)
-// (This β classification is invariant under the bug fix — N(1) was already
-//  {0, 2} under the buggy in-neighbor-only build because 1's out-neighbor
-//  {0} was already in its in-neighbor set.  The fix surfaces visible
-//  changes at vertices 3, 4, 5 — see DegreeMatchesDistinctNeighbors.)
+// Walks from u=0 with prev_u=1 see candidates {1, 2, 3, 4, 5}:
+//   - candidate 1 → returning (β = 1/p)
+//   - candidate 2 → in NeighborSets[1] (β = 1)
+//   - candidates 3, 4, 5 → not in NeighborSets[1] (β = 1/q)
 tea::TemporalGraph build_node2vec_test_graph() {
     std::vector<tea::Edge> edges = {
-        // inbound to v=0 from sources {1,2,3,4,5}
-        {1, 0, 100}, {2, 0, 200}, {3, 0, 300}, {4, 0, 400}, {5, 0, 500},
-        // inbound to v=1 from {0, 2}
-        {0, 1, 50},  {2, 1, 60},
-        // inbound to v=2 from {0, 3, 4}
-        {0, 2, 70},  {3, 2, 80},  {4, 2, 90},
+        // outbound from u=0 to {1,2,3,4,5} — newest first under DESC.
+        {0, 1, 500}, {0, 2, 400}, {0, 3, 300}, {0, 4, 200}, {0, 5, 100},
+        // outbound from u=1 to {0, 2}
+        {1, 0, 50},  {1, 2, 60},
+        // outbound from u=2 to {0, 3, 4}
+        {2, 0, 70},  {2, 3, 80},  {2, 4, 90},
     };
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/10, /*is_directed=*/true);
@@ -141,41 +138,41 @@ TEST(NeighborSets, BuildAndContains) {
     EXPECT_FALSE(ns.contains(1, 3));
 
     EXPECT_TRUE(ns.contains(2, 0));
-    EXPECT_TRUE(ns.contains(2, 1));   // out-edge 2→1 ({2,1,60}); undirected
+    EXPECT_TRUE(ns.contains(2, 1));   // 1→2 in-edge; undirected
     EXPECT_TRUE(ns.contains(2, 3));
     EXPECT_TRUE(ns.contains(2, 4));
     EXPECT_FALSE(ns.contains(2, 5));
 
-    // Vertices 3, 4, 5 have no inbound but have out-edges to 0 and 2 —
+    // Vertices 3, 4, 5 have no outbound but receive in-edges from 0 and 2 —
     // under the undirected build they pick up {0, 2} (or {0} for vertex 5).
-    EXPECT_TRUE(ns.contains(3, 0));   // 3→0 out-edge ({3,0,300})
-    EXPECT_TRUE(ns.contains(3, 2));   // 3→2 out-edge ({3,2,80})
+    EXPECT_TRUE(ns.contains(3, 0));   // 0→3 in-edge for vertex 3 ({0,3,300})
+    EXPECT_TRUE(ns.contains(3, 2));   // 2→3 in-edge for vertex 3 ({2,3,80})
     EXPECT_FALSE(ns.contains(3, 1));
     EXPECT_FALSE(ns.contains(9, 0));  // vertex 9 is isolated
 }
 
 TEST(NeighborSets, DegreeMatchesDistinctNeighbors) {
     // Undirected neighborhoods on the directed fixture from
-    // build_node2vec_test_graph (in + out, dedup):
-    //   N(0) = {1, 2, 3, 4, 5}  — in {1..5} ∪ out {1, 2}
-    //   N(1) = {0, 2}           — in {0, 2}  ∪ out {0}
-    //   N(2) = {0, 1, 3, 4}     — in {0, 3, 4} ∪ out {0, 1}
-    //   N(3) = {0, 2}           — in {} ∪ out {0, 2}
+    // build_node2vec_test_graph (out + in, dedup):
+    //   N(0) = {1, 2, 3, 4, 5}  — out {1..5} ∪ in {1, 2}
+    //   N(1) = {0, 2}           — out {0, 2}  ∪ in {0}
+    //   N(2) = {0, 3, 4}        — out {0, 3, 4} ∪ in {0, 1} = {0, 1, 3, 4}
+    //   N(3) = {0, 2}           — out {} ∪ in {0, 2}
     auto g = build_node2vec_test_graph();
     tea::NeighborSets ns;
     ns.build(g, /*input_was_directed=*/true);
     EXPECT_EQ(ns.degree(0), 5);
     EXPECT_EQ(ns.degree(1), 2);
-    EXPECT_EQ(ns.degree(2), 4);   // out-N adds {1}, growing from in-only {0, 3, 4}
-    EXPECT_EQ(ns.degree(3), 2);   // pre-fix this was 0 (no inbound to vertex 3)
+    EXPECT_EQ(ns.degree(2), 4);   // in-N adds {1}, growing from out-only {0, 3, 4}
+    EXPECT_EQ(ns.degree(3), 2);   // pre-fix this was 0 (no outbound from vertex 3)
 }
 
 TEST(NeighborSets, DuplicateEdgesDeduped) {
-    // Three duplicate inbound edges from 1 to 0 plus one from 2 to 0.
+    // Three duplicate outbound edges from 0 to 1 plus one from 0 to 2.
     // NeighborSets[0] should dedupe to {1, 2}.
     std::vector<tea::Edge> edges = {
-        {1, 0, 100}, {1, 0, 200}, {1, 0, 300},
-        {2, 0, 50},
+        {0, 1, 100}, {0, 1, 200}, {0, 1, 300},
+        {0, 2, 50},
     };
     tea::TemporalGraph g;
     g.build(std::move(edges), 5, true);
@@ -210,8 +207,8 @@ TEST(NeighborSets, ParallelBuildDeterministic) {
 // connected to w by any edge in either direction.
 //
 // Pre-fix, tea-reimpl's NeighborSets::build read only graph.targets_of(u),
-// which under inbound-CSR storage of a DIRECTED graph yields the
-// in-neighbors only — out-edges from u to w never made w a neighbor of u.
+// which under outbound-CSR storage of a DIRECTED graph yields the
+// out-neighbors only — in-edges to u from w never made w a neighbor of u.
 // On undirected graphs the bug was latent (the graph build mirrors each
 // edge to both endpoints, so targets_of(u) already covers both directions),
 // but on directed graphs the β distribution diverged from the convention.
@@ -219,14 +216,14 @@ TEST(NeighborSets, ParallelBuildDeterministic) {
 // These two tests pin the corrected semantic.
 // ----------------------------------------------------------------------------
 
-TEST(NeighborSets, DirectedOutEdgeContributesToUndirectedNeighborhood) {
+TEST(NeighborSets, DirectedInEdgeContributesToUndirectedNeighborhood) {
     // Minimal witness: a single directed edge 0 → 1.
     //
-    //   Pre-fix: NeighborSets[0] = {}  (0 has no inbound edges)
-    //   Post-fix: NeighborSets[0] = {1} (out-edge 0→1 makes 1 a neighbor)
+    //   Pre-fix: NeighborSets[1] = {}  (1 has no outbound edges)
+    //   Post-fix: NeighborSets[1] = {0} (in-edge from 0 makes 0 a neighbor)
     //
     // Crucially, this is the SMALLEST graph that exhibits the bug — any
-    // directed graph with at least one vertex whose only edge is outbound
+    // directed graph with at least one vertex whose only edge is inbound
     // breaks under the pre-fix build.
     std::vector<tea::Edge> edges = { {0, 1, 10} };
     tea::TemporalGraph g;
@@ -235,17 +232,17 @@ TEST(NeighborSets, DirectedOutEdgeContributesToUndirectedNeighborhood) {
     tea::NeighborSets ns;
     ns.build(g, /*input_was_directed=*/true);
 
-    // The out-neighbor leg of the fix (the case that was broken).
-    EXPECT_TRUE(ns.contains(0, 1))
-        << "vertex 0 is undirected-adjacent to 1 via the (0→1) out-edge; "
-           "this was the pre-fix failure mode.";
-    EXPECT_EQ(ns.degree(0), 1);
-
-    // The in-neighbor leg (was correct pre-fix; verify still works).
+    // The in-neighbor leg of the fix (the case that was broken).
     EXPECT_TRUE(ns.contains(1, 0))
-        << "vertex 1 has an inbound edge from 0; this remained correct "
-           "across the fix and serves as the in-side baseline.";
+        << "vertex 1 is undirected-adjacent to 0 via the (0→1) in-edge; "
+           "this was the pre-fix failure mode.";
     EXPECT_EQ(ns.degree(1), 1);
+
+    // The out-neighbor leg (was correct pre-fix; verify still works).
+    EXPECT_TRUE(ns.contains(0, 1))
+        << "vertex 0 has an outbound edge to 1; this remained correct "
+           "across the fix and serves as the out-side baseline.";
+    EXPECT_EQ(ns.degree(0), 1);
 
     // Isolated vertex 2 — no edges in either direction.
     EXPECT_EQ(ns.degree(2), 0);
@@ -256,18 +253,18 @@ TEST(NeighborSets, DirectedOutEdgeContributesToUndirectedNeighborhood) {
     EXPECT_FALSE(ns.contains(0, 2));
     EXPECT_FALSE(ns.contains(1, 2));
 
-    // β-check semantic spot-check: walker at vertex 1 with prev_u = 0,
+    // β-check semantic spot-check: walker at vertex 0 with prev_u = 1,
     // looking at candidate w = ?.  Under the fix, every vertex on which
     // accept_ratio depends on "is w ∈ N(prev_u)" sees the undirected
-    // adjacency, which matters when the only edge between 0 and w is
-    // 0→w (not w→0).
+    // adjacency, which matters when the only edge between 1 and w is
+    // w→1 (not 1→w).
     tea::Node2VecBias bias;
     bias.p = 1.0;
     bias.q = 2.0;  // β_max = 1
-    // candidate_v = 1 is a neighbor of prev_u = 0 under undirected.
-    EXPECT_DOUBLE_EQ(bias.accept_ratio(/*prev_u=*/0, /*candidate_v=*/1, ns), 1.0);
-    // candidate_v = 2 is not adjacent to 0.
-    EXPECT_DOUBLE_EQ(bias.accept_ratio(0, 2, ns), 1.0 / 2.0 / 1.0);  // 1/q / β_max
+    // candidate_v = 0 is a neighbor of prev_u = 1 under undirected.
+    EXPECT_DOUBLE_EQ(bias.accept_ratio(/*prev_u=*/1, /*candidate_v=*/0, ns), 1.0);
+    // candidate_v = 2 is not adjacent to 1.
+    EXPECT_DOUBLE_EQ(bias.accept_ratio(1, 2, ns), 1.0 / 2.0 / 1.0);  // 1/q / β_max
 }
 
 TEST(NeighborSets, UndirectedGraphBuildPathUnaffected) {
@@ -424,12 +421,12 @@ TEST(Node2VecSampler, ExtremeQBiasesAwayFromFarVertices) {
     // the β contribution.  With ts step = 1, weights span exp(-4)..exp(0),
     // letting β=1/q=0.01 visibly suppress the "far" candidates.
     //
-    // Inbound layout for the n2v candidate set at v=0:
-    //   v=0 ← inbound from 1@1, 2@2, 3@3, 4@4, 5@5
-    //   v=1 ← inbound from 0@10, 2@11    (so NeighborSets[1] = {0, 2})
+    // Outbound layout for the n2v candidate set at u=0:
+    //   u=0 → outbound to 1@5, 2@4, 3@3, 4@2, 5@1 (DESC by ts, target 1 newest)
+    //   u=1 → outbound to 0@10, 2@11             (so NeighborSets[1] = {0, 2})
     std::vector<tea::Edge> edges = {
-        {1, 0, 1}, {2, 0, 2}, {3, 0, 3}, {4, 0, 4}, {5, 0, 5},
-        {0, 1, 10}, {2, 1, 11},
+        {0, 1, 5}, {0, 2, 4}, {0, 3, 3}, {0, 4, 2}, {0, 5, 1},
+        {1, 0, 10}, {1, 2, 11},
     };
     tea::TemporalGraph g;
     g.build(std::move(edges), /*num_vertices=*/10, /*is_directed=*/true);
@@ -447,7 +444,7 @@ TEST(Node2VecSampler, ExtremeQBiasesAwayFromFarVertices) {
     tea::Pcg64 rng(0xc77, 0);
     tea::SamplerScratch scratch;
     auto targets = g.targets_of(0);
-    // ASC ordering → targets = [1, 2, 3, 4, 5].
+    // DESC ordering → targets = [1, 2, 3, 4, 5] (newest first).
     ASSERT_EQ(targets.size(), 5u);
     ASSERT_EQ(targets[0], 1);
     ASSERT_EQ(targets[1], 2);

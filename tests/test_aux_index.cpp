@@ -37,11 +37,11 @@ namespace {
 tea::TemporalGraph make_mixed_graph() {
     const int degrees[] = {65, 100, 128, 200, 511, 1024, 0};
     std::vector<tea::Edge> edges;
-    for (int v = 0; v < 7; ++v) {
-        // Fan-in to v: each v gets `degrees[v]` inbound edges from
-        // sources 5000..5000+degrees[v]-1.
-        for (int j = 0; j < degrees[v]; ++j) {
-            edges.push_back({5000 + j, v, 10000 + j});
+    for (int u = 0; u < 7; ++u) {
+        // Fan-out from u: each u gets `degrees[u]` outbound edges to
+        // destinations 5000..5000+degrees[u]-1.
+        for (int j = 0; j < degrees[u]; ++j) {
+            edges.push_back({u, 5000 + j, 10000 + j});
         }
     }
     tea::TemporalGraph g;
@@ -206,10 +206,10 @@ TEST(AuxIndex, SamplerOutputBitIdenticalWithAndWithoutAux) {
 
         // Sweep candidate-set sizes by varying t_prev across the timestamp
         // range of u, to exercise different cover decompositions.  Storage
-        // is time-ASC, so ts[0] is the smallest and ts[end] is the largest.
+        // is time-DESC, so ts[0] is the largest and ts[end] is the smallest.
         const auto ts = g.timestamps_of(u);
-        const int64_t t_min = ts[0];
-        const int64_t t_max = ts[ts.size() - 1];
+        const int64_t t_max = ts[0];
+        const int64_t t_min = ts[ts.size() - 1];
         for (int32_t k = 0; k < ITERS; ++k) {
             const int64_t t_prev = t_min + (k % (t_max - t_min + 2)) - 1;
             const auto sa = tea::sample_hpat(g, hpat_with,    bias, u, t_prev, rng_a, scratch_a);

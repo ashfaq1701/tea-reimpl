@@ -15,15 +15,15 @@
 //     contains the full undirected neighborhood of u.  A single dedupe pass
 //     yields the answer.
 //   • For a graph built with is_directed = true, TemporalGraph stores only
-//     the INBOUND side: graph.targets_of(u) is the SOURCES of edges into u
-//     (in-neighbors only).  We have to recover out-neighbors via a transpose
-//     pass over the inbound-CSR ("u→v" exists iff u appears in
+//     the OUTBOUND side: graph.targets_of(u) is the DESTINATIONS of edges
+//     leaving u (out-neighbors only).  We have to recover in-neighbors via
+//     a transpose pass over the outbound-CSR ("v→u" exists iff u appears in
 //     graph.targets_of(v)").
 //
 // History: the original implementation called build(graph) without an
 // `input_was_directed` flag and only used graph.targets_of(u).  On directed
-// inputs that gave in-neighbors only — wrong relative to the node2vec
-// convention, and observably different from Tempest's β distribution.
+// inputs that gave a single-direction neighborhood — wrong relative to the
+// node2vec convention, and observably different from Tempest's β distribution.
 //
 // Design notes (unchanged from the original):
 //
@@ -70,9 +70,10 @@ public:
         const int32_t N = graph.num_vertices();
         offsets_.assign(N + 1, 0);
 
-        // -- Optional transpose pass: build per-vertex out-adjacency as a
-        //    CSR.  Skipped for undirected inputs (graph.targets_of(u)
-        //    already contains both directions in that case).
+        // -- Optional transpose pass: build per-vertex other-direction-
+        //    adjacency as a CSR.  Skipped for undirected inputs
+        //    (graph.targets_of(u) already contains both directions in that
+        //    case).
         std::vector<int64_t> out_offsets;
         std::vector<int32_t> out_neighbors_arena;
         if (input_was_directed) {
@@ -82,8 +83,8 @@ public:
             for (int32_t v = 0; v < N; ++v) {
                 const auto in_tgts = graph.targets_of(v);
                 for (std::size_t i = 0; i < in_tgts.size(); ++i) {
-                    // in_tgts[i] is the source of an edge into v —
-                    // equivalently, an out-edge from in_tgts[i] to v.
+                    // in_tgts[i] is the destination of an edge leaving v —
+                    // equivalently, an in-edge to in_tgts[i] from v.
                     #pragma omp atomic update
                     ++out_degree[in_tgts[i]];
                 }

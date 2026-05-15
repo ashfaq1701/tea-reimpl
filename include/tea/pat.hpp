@@ -1,8 +1,8 @@
 // PAT (Persistent Alias Table) — paper §3.2.
 //
 // Per vertex u with degree D_u:
-//   • partition u's time-ASC-sorted edge list into trunks of size T_u = √D_u
-//     (ASC because walks are backward-in-time; see graph.hpp)
+//   • partition u's time-DESC-sorted edge list into trunks of size T_u = √D_u
+//     (DESC because walks are forward-in-time; see graph.hpp)
 //   • for each trunk, build a Vose alias table
 //   • store the inclusive prefix-sum of per-trunk total weights
 //
@@ -18,7 +18,7 @@
 //
 //   • alias_arena[E]    — global flat array of AliasEntry, layout shared
 //                          with TemporalGraph's CSR (alias_arena[off(u) + i]
-//                          is the alias entry for u's i-th time-asc edge).
+//                          is the alias entry for u's i-th time-desc edge).
 //                          Total memory: 8 × E bytes (e.g. 2.4 GB for delicious).
 //   • cumsum_arena[Σ T_u]  — global flat array of doubles; per-vertex slice is
 //                          the INCLUSIVE prefix sum of per-trunk totals.
@@ -163,7 +163,7 @@ public:
 
     // Alias view over a specific trunk of vertex u. The trunk's edges occupy
     // positions [trunk_idx * T_u, min((trunk_idx + 1) * T_u, D_u)) in u's
-    // time-asc edge list.
+    // time-desc edge list.
     AliasView alias_view_of_trunk(const TemporalGraph& graph,
                                   int32_t u,
                                   int32_t trunk_idx) const noexcept {

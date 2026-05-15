@@ -61,9 +61,9 @@ namespace detail {
 //   SampledStep sample(int32_t u, int64_t t_prev, int32_t prev_u,
 //                      Pcg64& rng, SamplerScratch& scratch);
 //
-// Backward walks always seed t_prev with kSentinelStartTimestamp
-// (INT64_MAX) so every inbound edge of the start vertex is a first-hop
-// candidate (t < INT64_MAX is trivially true for every real timestamp).
+// Forward walks always seed t_prev with kSentinelStartTimestamp
+// (INT64_MIN) so every outbound edge of the start vertex is a first-hop
+// candidate (t > INT64_MIN is trivially true for every real timestamp).
 template <typename SampleFn>
 inline WalkRunStats run_walks_impl(
         const int32_t*  start_vertices,
@@ -226,8 +226,8 @@ inline std::vector<int32_t> make_all_nodes_starts(
         const TemporalGraph& graph,
         int32_t              walks_per_node) {
     const int32_t N = graph.num_vertices();
-    // Only include vertices that have a non-empty inbound adjacency
-    // (otherwise the backward walk dies immediately and the slot is wasted).
+    // Only include vertices that have a non-empty outbound adjacency
+    // (otherwise the forward walk dies immediately and the slot is wasted).
     std::vector<int32_t> starts;
     starts.reserve(static_cast<std::size_t>(N) * walks_per_node);
     for (int32_t u = 0; u < N; ++u) {
