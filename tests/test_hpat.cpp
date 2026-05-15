@@ -376,8 +376,9 @@ TEST(SamplerHpat, ExponentialDistribution) {
     tea::ExponentialBias bias;
     hpat.build(g, bias);
     auto p = analytic_probs(g, bias, 0);
-    // DESC: newest (largest t) at first position → largest weight.
-    EXPECT_GT(p.front(), p[1]);
+    // Tempest-forward exp pivot (t_min): oldest (smallest t) at last
+    // position → largest weight; newest (first position) → smallest.
+    EXPECT_GT(p.back(), p[p.size() - 2]);
     distribution_check_hpat(g, hpat, bias, 0, tea::kSentinelStartTimestamp,
                             300000, 0x4444, p, 0);
 }

@@ -153,11 +153,12 @@ TEST(Solo, FullPrefixDistributionMatchesAnalyticLinear) {
     ASSERT_TRUE(hpat.is_solo(0));
 
     // Expected analytic distribution: edge at position i (in time-DESC list)
-    // has rank D - i, so P(i) = (D - i) / (D·(D+1)/2).
+    // has weight i + 1 (Tempest-forward semantic: oldest = highest weight),
+    // so P(i) = (i + 1) / (D·(D+1)/2).
     std::vector<double> expected_p(D);
     const double total = static_cast<double>(D) * (D + 1) / 2.0;
     for (int32_t i = 0; i < D; ++i) {
-        expected_p[i] = static_cast<double>(D - i) / total;
+        expected_p[i] = static_cast<double>(i + 1) / total;
     }
 
     // Sample 200K times with t_prev = -∞ so candidate set = full D.
@@ -200,12 +201,12 @@ TEST(Solo, PartialPrefixDistributionMatchesAnalyticLinear) {
     const int64_t t_prev = 1007;
     ASSERT_EQ(g.candidate_set_len(0, t_prev), L);
 
-    // Expected: under LinearBias, weights for the time-DESC prefix [0, L)
-    // are rank = D - position = 20, 19, ..., 9.
+    // Expected: under LinearBias (Tempest-forward), weights for the
+    // time-DESC prefix [0, L) are position + 1 = 1, 2, ..., L.
     std::vector<double> weights(L);
     double sum = 0.0;
     for (int64_t i = 0; i < L; ++i) {
-        weights[i] = static_cast<double>(D - i);
+        weights[i] = static_cast<double>(i + 1);
         sum += weights[i];
     }
     std::vector<double> expected_p(L);

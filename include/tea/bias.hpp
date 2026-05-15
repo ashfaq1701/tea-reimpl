@@ -5,36 +5,43 @@
 // state and per-vertex neighbor sets.
 //
 // Direction: walks are FORWARD-IN-TIME (graph.hpp).  Per-vertex edge
-// lists are stored DESCENDING by timestamp.  Every bias here preserves
-// the invariant "largest t in the candidate set has the largest weight" —
-// for forward walks that means the furthest-future edge from t_prev is
-// favoured, matching the TEA paper §2.3 weighting convention (§2.3.I:
-// rank D = newest; §2.3.II: δ(e) = exp(t_i) after t_cur cancellation).
+// lists are stored DESCENDING by timestamp.
 //
-// === Proper-TEA correctness notes ===
+// Bias semantics in this branch are FORWARD-FRIENDLY, matching Tempest's
+// forward picker convention: within the candidate set Γ_{t_prev}(u) =
+// {t > t_prev}, the *most-immediate-next* edge (smallest admissible t —
+// closest after t_prev) gets the largest weight, and the furthest-future
+// edge gets the smallest.  This is the practical recency-continuity bias
+// every representation-learning paper actually wants — and the inverse of
+// the TEA paper's literal §2.3 formula (which favours the furthest-future
+// jump and produces walks that teleport to the latest timestamp on every
+// step).  Tempest's authors silently re-derived the formula, and we
+// follow them.
 //
-// • Linear (paper §2.3 I): δ(e) = rank(e), where rank is 1..D with the
-//   newest edge getting rank D and the oldest rank 1. The paper allows
-//   either rank or t_i directly; we pick rank because it is invariant
-//   under affine time transforms (so the picker behaves the same across
-//   datasets that differ only in time-unit conventions, e.g. unix-seconds
-//   vs nanoseconds). Both choices are within the paper's spec.  On the
-//   DESCENDING-time storage layout, "position p" corresponds to rank
-//   D − p (position 0 = newest = rank D; position D-1 = oldest = rank 1).
+// === Correctness notes ===
 //
-// • Exponential (paper §2.3 II): δ(e) = exp(t_i).  The normalization
-//   makes any additive shift a no-op (softmax is shift-invariant), so we
-//   use exp(t_i − t_max_u) which is numerically equivalent and never
-//   overflows (largest weight = exp(0) = 1 at the newest edge). Older
-//   edges with very large negative exponents underflow to 0 — that is
-//   the *correct* behavior under pure exponential bias on unix-timescale
-//   data, NOT a bug.
+// • Linear: δ(e) = position + 1 on the DESCENDING-time storage layout.
+//   Position 0 (newest in vertex history) gets weight 1; position D-1
+//   (oldest in vertex history) gets weight D.  Inside the forward
+//   candidate prefix [0, L), position L-1 (smallest admissible t = most-
+//   immediate-next) carries the largest weight L, and position 0 (largest
+//   admissible t = furthest future) carries weight 1.  Same per-edge
+//   distribution as Tempest's `pick_random_linear(0, L, prioritize_end=
+//   false, r)` for unique-timestamp graphs.
 //
-//   Scaling is NOT shift-invariant. My earlier "rescale to [0, 80]"
-//   approach silently distorted the softmax temperature. We do not
-//   rescale by default. The `timescale_bound` knob (paper API parity
-//   with Tempest's same-named flag) re-enables a controlled rescale for
-//   the cross-comparison runs; it changes the distribution and that is
+// • Exponential: δ(e) = exp((t_min_u − t) · scale).  At t = t_min_u
+//   (oldest in vertex history, also the smallest-admissible-t in any
+//   forward candidate that includes it), weight = exp(0) = 1.  At t =
+//   t_max_u, weight = exp(-(t_max_u − t_min_u) · scale) → underflows to
+//   0 on long-span unix-timestamp data, which is the correct paper-style
+//   limit of pure exponential bias.  Pivoting on t_min keeps the exponent
+//   ≤ 0 so the alias-table build never overflows.  Equivalent per-edge
+//   distribution to Tempest's per-group weight `group_size · exp((t_min −
+//   t_g) · scale)` after normalisation.
+//
+//   Scaling is NOT shift-invariant. The `timescale_bound` knob (paper API
+//   parity with Tempest's same-named flag) re-enables a controlled rescale
+//   for the cross-comparison runs; it changes the distribution and that is
 //   documented explicitly.
 //
 // === API ===
@@ -95,42 +102,38 @@ struct UniformBias {
 };
 
 // ============================================================================
-// LinearBias: δ(e) = rank(e), newest = D, oldest = 1.
+// LinearBias: δ(e) = position + 1 on the DESCENDING-time storage.
 //
-// In ts_desc (DESCENDING time order), the edge at position p has
-// rank = D − p (position 0 = newest = rank D; position D-1 = oldest = rank 1).
-// The slice_start_pos argument lets PAT/HPAT compute the rank for a
-// sub-range without seeing the full edge list at sample time.
+// In ts_desc (DESCENDING time order), position 0 holds the newest edge
+// and position D-1 holds the oldest.  This bias assigns weight = p + 1
+// at position p, so the OLDEST edge gets weight D and the NEWEST gets
+// weight 1.  Within the forward candidate prefix [0, L), the smallest
+// admissible t (at position L-1 — the most-immediate-next edge) ends up
+// with the largest weight L.
 //
-// PerVertexParams stashes D so that the slice-aware compute_weights can
-// recover rank from (slice_start_pos + i) without the full per-vertex
-// timestamps available.
+// PerVertexParams is empty: weight is a function of position alone, no
+// per-vertex preprocessing needed.  The slice_start_pos argument lets
+// PAT/HPAT's partial-trunk recompute reconstruct absolute position from
+// a sub-range.
 // ============================================================================
 struct LinearBias {
     static constexpr bool        needs_prev_vertex = false;
     static constexpr const char* name() { return "linear"; }
 
-    struct PerVertexParams {
-        int32_t degree = 0;
-    };
+    struct PerVertexParams { /* empty */ };
 
     PerVertexParams compute_per_vertex_params(
-        span<const int64_t> ts_desc) const noexcept {
-        PerVertexParams p;
-        p.degree = static_cast<int32_t>(ts_desc.size());
-        return p;
-    }
+        span<const int64_t> /*ts_desc*/) const noexcept { return {}; }
 
     inline void compute_weights(span<const int64_t> ts_slice,
-                                const PerVertexParams& params,
+                                const PerVertexParams& /*params*/,
                                 int32_t slice_start_pos,
                                 double* out) const noexcept {
         const std::size_t d = ts_slice.size();
-        const int32_t D = params.degree;
         for (std::size_t i = 0; i < d; ++i) {
-            // rank in original time-desc list = D − position
+            // weight at desc position p = p + 1
             out[i] = static_cast<double>(
-                D - (slice_start_pos + static_cast<int32_t>(i)));
+                slice_start_pos + static_cast<int32_t>(i) + 1);
         }
     }
 
@@ -142,12 +145,18 @@ struct LinearBias {
 };
 
 // ============================================================================
-// ExponentialBias: δ(e) = exp((t_i − t_max_u) × scale).
+// ExponentialBias: δ(e) = exp((t_min_u − t_i) × scale).
 //
-// scale = 1.0       (default, timescale_bound ≤ 0): proper TEA, the softmax
-//                   distribution of exp(t_i) without any temperature change.
-//                   On unix-timescale data, older edges underflow to 0; that
-//                   is correct behavior, not a bug.
+// Pivots on t_min_u so the oldest edge in the vertex's history (and the
+// most-immediate-next admissible edge in any forward candidate prefix)
+// lands at exp(0) = 1.  The exponent is always ≤ 0, so weights live in
+// (0, 1] regardless of timescale_bound, and the alias-table build never
+// overflows.  Far-future edges underflow to 0 on long-span unix-timestamp
+// data — the correct paper-style limit of pure exp on that scale.
+//
+// scale = 1.0       (default, timescale_bound ≤ 0): proper TEA softmax of
+//                   exp(t_i) without temperature change, in the Tempest
+//                   forward sign convention.
 //
 // scale = timescale_bound / (t_max_u − t_min_u)  (timescale_bound > 0):
 //                   Tempest-compatible mode. Compresses the per-vertex time
@@ -164,7 +173,7 @@ struct ExponentialBias {
     double timescale_bound = -1.0;
 
     struct PerVertexParams {
-        double t_pivot;  // = t_max_u
+        double t_pivot;  // = t_min_u (smallest ts seen at this vertex)
         double scale;    // = 1.0 (proper TEA) or timescale_bound / span (compat)
     };
 
@@ -177,12 +186,12 @@ struct ExponentialBias {
         const double span  = t_max - t_min;
         if (span <= 0.0) {
             // All same timestamp → uniform (scale=0 makes every weight exp(0)=1)
-            return PerVertexParams{t_max, 0.0};
+            return PerVertexParams{t_min, 0.0};
         }
         const double scale = (timescale_bound > 0.0)
             ? timescale_bound / span
             : 1.0;
-        return PerVertexParams{t_max, scale};
+        return PerVertexParams{t_min, scale};
     }
 
     inline void compute_weights(span<const int64_t> ts_slice,
@@ -192,7 +201,7 @@ struct ExponentialBias {
         const std::size_t d = ts_slice.size();
         for (std::size_t i = 0; i < d; ++i) {
             const double t = static_cast<double>(ts_slice[i]);
-            out[i] = std::exp((t - params.t_pivot) * params.scale);
+            out[i] = std::exp((params.t_pivot - t) * params.scale);
         }
     }
 

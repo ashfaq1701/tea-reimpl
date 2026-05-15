@@ -235,18 +235,19 @@ TEST(SamplerPat, LinearDistribution_WithPartialTrunk) {
 // ============================================================================
 TEST(SamplerPat, ExponentialDistribution_SmallTimeScale) {
     // Use small timestamps so exp() doesn't underflow.  K=4 → no partial trunk.
-    // ts step = 1: ts_desc = [4, 3, 2, 1] → t_max = 4.
-    // Weights at positions 0..3 = exp(0), exp(-1), exp(-2), exp(-3).
+    // ts step = 1: ts_desc = [4, 3, 2, 1] → t_min = 1.
+    // Weights at positions 0..3 = exp(-3), exp(-2), exp(-1), exp(0).
     auto g = build_star(4, /*ts_step=*/1);
     tea::Pat<tea::ExponentialBias> pat;
     tea::ExponentialBias bias;
     pat.build(g, bias);
 
     auto p = analytic_probs(g, bias, 0);
-    // Sanity: newest edge (first position in desc) gets the largest probability.
-    EXPECT_GT(p[0], p[1]);
-    EXPECT_GT(p[1], p[2]);
-    EXPECT_GT(p[2], p[3]);
+    // Sanity: oldest edge (last position in desc, smallest t) gets the
+    // largest probability under Tempest-forward pivot.
+    EXPECT_GT(p[3], p[2]);
+    EXPECT_GT(p[2], p[1]);
+    EXPECT_GT(p[1], p[0]);
     distribution_check(g, pat, bias, 0, kAllEligible, 300000, 0x789, p, 0);
 }
 

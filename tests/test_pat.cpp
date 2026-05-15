@@ -117,14 +117,14 @@ TEST(PatBuild, BiasParamsAreStored) {
     tea::Pat<tea::ExponentialBias> pat;
     pat.build(g, bias);
 
-    // u=0 has 10 outbound edges with ts in 1000..1009. After time-desc sort: t_max=1009.
+    // u=0 has 10 outbound edges with ts in 1000..1009. Pivot on t_min = 1000.
     const auto& p0 = pat.bias_params_of(0);
-    EXPECT_DOUBLE_EQ(p0.t_pivot, 1009.0);
+    EXPECT_DOUBLE_EQ(p0.t_pivot, 1000.0);
     EXPECT_DOUBLE_EQ(p0.scale, 1.0);
 
-    // u=1 has 100 outbound edges with ts in 2000..2099. t_max=2099.
+    // u=1 has 100 outbound edges with ts in 2000..2099. t_min = 2000.
     const auto& p1 = pat.bias_params_of(1);
-    EXPECT_DOUBLE_EQ(p1.t_pivot, 2099.0);
+    EXPECT_DOUBLE_EQ(p1.t_pivot, 2000.0);
     EXPECT_DOUBLE_EQ(p1.scale, 1.0);
 }
 
@@ -204,9 +204,10 @@ TEST(PatBuild, ParallelBuildIsDeterministic) {
 }
 
 TEST(PatBuild, ExpBiasTrunkTotalsReflectTimeOrdering) {
-    // Under time-DESC storage, the FIRST trunk (newest edges) should have
-    // the largest weight under ExpBias — exp(t_max − t_max) = 1 lives at
-    // position 0, exp((older t) − t_max) ≪ 1 lives toward the end.
+    // Under time-DESC storage with Tempest-forward exp pivot (t_min), the
+    // LAST trunk (oldest edges) should have the largest weight under
+    // ExpBias — exp(t_min − t_min) = 1 lives at position D-1 (desc-list
+    // tail), while exp((newer t) − t_min) ≪ 1 lives at position 0.
     auto g = build_test_graph();
     tea::Pat<tea::ExponentialBias> pat;
     pat.build(g, tea::ExponentialBias{});
@@ -217,6 +218,6 @@ TEST(PatBuild, ExpBiasTrunkTotalsReflectTimeOrdering) {
     const std::size_t K = cs.size();
     const double t_first = cs[0];
     const double t_last  = cs[K - 1] - cs[K - 2];
-    EXPECT_GT(t_first, t_last)
-        << "newest trunk (desc-list start) should have higher total weight than the oldest";
+    EXPECT_GT(t_last, t_first)
+        << "oldest trunk (desc-list end) should have higher total weight than the newest";
 }
